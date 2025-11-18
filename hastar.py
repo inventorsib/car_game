@@ -9,13 +9,16 @@ from math import tan, atan2, acos, pi, sqrt, cos, sin
 class Node:
     """Узел для Hybrid A*"""
     def __init__(self, x: float, y: float, theta: float, 
-                 g: float = 0, h: float = 0, previousNode=None):
+                 g: float = 0, h: float = 0, previousNode=None,
+                 analytic_path: List[Tuple[float, float, float]] = None):
         self.x = x
         self.y = y
         self.theta = theta  # ориентация в радианах
         self.g = g  # стоимость от старта
         self.h = h  # эвристическая стоимость до цели
         self.previousNode = previousNode
+        # Храним промежуточные точки аналитического пути
+        self.analytic_path = analytic_path if analytic_path else []
         
     @property
     def f(self):
@@ -36,13 +39,13 @@ class CachedDubinsHeuristic:
                          goal: Tuple[float, float, float]) -> Tuple:
         """Создание ключа для кэша с дискретизацией"""
         # Дискретизация координат и углов для группировки похожих запросов
-        x1 = round(start[0] * 2) / 2  # дискретизация до 0.5 метра
-        y1 = round(start[1] * 2) / 2
-        theta1 = round(start[2] / (np.pi / 8))  # дискретизация до 22.5 градусов
+        x1 = round(start[0] * 2) / 20  # дискретизация до 0.5 метра
+        y1 = round(start[1] * 2) / 20
+        theta1 = round(start[2] / (np.pi / 40))  # дискретизация до pi/20 радиан
         
-        x2 = round(goal[0] * 2) / 2
-        y2 = round(goal[1] * 2) / 2  
-        theta2 = round(goal[2] / (np.pi / 8))
+        x2 = round(goal[0] * 2) / 20
+        y2 = round(goal[1] * 2) / 20 
+        theta2 = round(goal[2] / (np.pi / 40)) 
         
         return (x1, y1, theta1, x2, y2, theta2)
     
@@ -509,8 +512,10 @@ class HybridAStar:
         self.turning_radius = self.wheel_base / math.tan(self.max_steering_angle)
         
         # Параметры аналитического расширения
-        self.expansion_interval = 10  # Каждый N-й узел пытаемся сделать расширение
-        self.max_analytic_expansion_distance = 0*200.0  # Макс. расстояние для расширения
+        self.expansion_interval = 1  # Каждый N-й узел пытаемся сделать расширение
+        self.max_analytic_expansion_distance = 200.0  # Макс. расстояние для расширения
+        self.analytic_expansion_max_points = 50  # Макс точек в аналитическом пути
+        self.min_analytic_segment_length = 0.1   # Минимальная длина сегмента
 
         # Эвристика Дубинса
         self.dubins = DubinsPath(self.turning_radius)
@@ -523,67 +528,6 @@ class HybridAStar:
         self.collision_checker = CollisionChecker(grid, resolution)
         self.successor_cache = SuccessorCache()
 
-    '''
-    #// def heuristic(self, node: Node, goal: Node) -> float:
-    #//     """Эвристическая функция (расстояние + ориентация)"""
-    #//     #// # TODO: heuristic from dubins
-    #//     #// dx = goal.x - node.x
-    #//     #// dy = goal.y - node.y
-    #//     #// distance = math.sqrt(dx**2 + dy**2)
-    #//     #// # Учитываем разницу в ориентации
-    #//     #// angle_diff = min(abs(node.theta - goal.theta), 
-    #//     #//                 2 * math.math.pi - abs(node.theta - goal.theta))
-    #//     #// return distance + 0.1 * angle_diff
-    #//     """Детальная эвристика по Дубинсу"""
-    #//     start = (node.x, node.y, node.theta)
-    #//     target = (goal.x, goal.y, goal.theta)
-    #//     length, _, _ = self.dubins_heuristic.find_shortest_path(start, target)
-    #//     return length
-    #//def is_collision(self, x: float, y: float) -> bool:
-    #//    """Проверка столкновения"""
-    #//    grid_x = int(x / self.resolution)
-    #//    grid_y = int(y / self.resolution)
-    #//    if (0 <= grid_x < self.width and 0 <= grid_y < self.height):
-    #//        return self.grid[grid_y, grid_x] == 1
-    #//    return True
-    #//def get_successors(self, node: Node) -> List[Node]:
-    #//    """Генерация преемников с учётом кинематики"""
-    #//    successors = []
-    #//    # TODO: Вероятно стоит перенести в глобальные настройки алгоритма
-    #//    steering_angles = [-self.max_steering_angle, 0, self.max_steering_angle]
-    #//    # Более интеллектуальный выбор шагов
-    #//    if node.h < 5.0:  # Близко к цели - мелкие шаги
-    #//        step_sizes = [0.1, 0.25, 0.5]
-    #//    else:  # Далеко от цели - крупные шаги
-    #//        step_sizes = [1.0, 2.0, 3.0]
-    #//    # DEBUG: only little steps
-    #//    #//step_sizes = [0.1, 0.15, 0.25]
-    #//    for steering in steering_angles:
-    #//        for step in step_sizes:
-    #//            # Кинематическая модель велосипеда
-    #//            if abs(steering) < 1e-5:
-    #//                # Движение прямо
-    #//                new_x = node.x + step * math.cos(node.theta)
-    #//                new_y = node.y + step * math.sin(node.theta)
-    #//                new_theta = node.theta
-    #//            else:
-    #//                # Поворот
-    #//                turning_radius = self.wheel_base / math.tan(steering)
-    #//               angular_velocity = step / turning_radius
-    #//               
-    #//               new_theta = node.theta + angular_velocity
-    #//               new_x = node.x + turning_radius * (math.sin(new_theta) - math.sin(node.theta))
-    #//                new_y = node.y + turning_radius * (math.cos(node.theta) - math.cos(new_theta))  
-    #//            # Нормализация угла
-    #//            new_theta = new_theta % (2 * math.pi)  
-    #//            # Проверка столкновений
-    #//            if not self.is_collision(new_x, new_y):
-    #//                cost = step  # базовая стоимость - пройденное расстояние
-    #//                successor = Node(new_x, new_y, new_theta, 
-    #//                               node.g + cost, 0, node)
-    #//                successors.append(successor)
-    #//    return successors
-    '''   
     
     def heuristic(self, node: Node, goal: Node):
         """Эвристика с кэшированием"""
@@ -612,7 +556,7 @@ class HybridAStar:
         else:
             step_sizes = [1.0, 2.0, 3.0]
 
-        step_sizes = [0.25, 0.5, 1]
+        step_sizes = [0.25, 0.5, 1.0]
 
         # Пакетная проверка столкновений для всех потенциальных преемников
         potential_points = []
@@ -748,10 +692,10 @@ class HybridAStar:
 
     def analytic_expansion(self, node: Node, goal: Node) -> Optional[Node]:
         """
-        Попытка прямого соединения с целью через Dubins path
+        Улучшенное аналитическое расширение с генерацией промежуточных точек
         """
-        # Проверяем расстояние - не пытаемся если слишком далеко
         distance_to_goal = math.sqrt((goal.x - node.x)**2 + (goal.y - node.y)**2)
+        
         if distance_to_goal > self.max_analytic_expansion_distance:
             return None
         
@@ -767,13 +711,81 @@ class HybridAStar:
             return None
         
         # Проверяем, что путь свободен от препятствий
-        if self.is_dubins_path_collision_free(params):
-            # Создаем узел, который ведет прямо к цели
-            analytic_node = Node(goal.x, goal.y, goal.theta, 
-                               node.g + length, 0, node)
-            return analytic_node
+        if not self.is_dubins_path_collision_free(params):
+            return None
         
-        return None
+        # Генерируем промежуточные точки пути Дубенса
+        analytic_points = self.generate_analytic_path_points(node, goal, params)
+        
+        if not analytic_points:
+            return None
+            
+        # Создаем конечный узел с прикрепленным аналитическим путем
+        analytic_node = Node(goal.x, goal.y, goal.theta, 
+                           node.g + length, 0, node, analytic_points)
+        
+        return analytic_node
+    
+    def generate_analytic_path_points(self, start_node: Node, goal_node: Node, 
+                                    params: Params) -> List[Tuple[float, float, float]]:
+        """
+        Генерирует промежуточные точки аналитического пути Дубенса
+        с проверкой столкновений для каждого сегмента
+        """
+        # Генерируем точки вдоль пути Дубенса
+        dubins_points = self.dubins.generate_path_points(
+            params, self.analytic_expansion_max_points
+        )
+        
+        # Фильтруем точки: оставляем только те, что проходят проверку столкновений
+        safe_points = []
+        previous_point = (start_node.x, start_node.y, start_node.theta)
+        
+        for point in dubins_points:
+            x, y, theta = point
+            
+            # Проверяем столкновение для текущей точки
+            if self.is_collision(x, y):
+                break  # Прерываем если наткнулись на препятствие
+                
+            # Проверяем весь сегмент от предыдущей точки до текущей
+            if not self.is_segment_collision_free(previous_point, point):
+                break
+                
+            safe_points.append(point)
+            previous_point = point
+        
+        # Всегда добавляем конечную точку (цель)
+        if not safe_points or safe_points[-1] != (goal_node.x, goal_node.y, goal_node.theta):
+            if not self.is_collision(goal_node.x, goal_node.y):
+                safe_points.append((goal_node.x, goal_node.y, goal_node.theta))
+        
+        return safe_points
+    
+    def is_segment_collision_free(self, start: Tuple[float, float, float], 
+                                end: Tuple[float, float, float], 
+                                step_size: float = 0.5) -> bool:
+        """
+        Проверяет весь сегмент пути на столкновения
+        """
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        distance = math.sqrt(dx*dx + dy*dy)
+        
+        if distance < self.min_analytic_segment_length:
+            return True
+            
+        steps = max(2, int(distance / step_size))
+        
+        for i in range(1, steps):
+            t = i / steps
+            x = start[0] + dx * t
+            y = start[1] + dy * t
+            
+            if self.is_collision(x, y):
+                return False
+                
+        return True
 
     def is_dubins_path_collision_free(self, params: Params, step_size: float = 0.5) -> bool:
         """
@@ -816,14 +828,109 @@ class HybridAStar:
             path.append(current)
             current = current.previousNode
         return path[::-1]
+    
 
-# Пример использования
+def visualize_path_with_analytic(grid: np.ndarray, path: List[Node], start, goal):
+    """Визуализация пути с выделением аналитических сегментов"""
+    plt.figure(figsize=(14, 12))
+    
+    # Отображение карты
+    plt.imshow(grid, cmap='Greys', origin='lower')
+    
+    if path:
+        # Разделяем обычные точки и аналитические сегменты
+        regular_x, regular_y = [], []
+        analytic_segments = []
+        
+        current_segment = []
+        for node in path:
+            if node.analytic_path:
+                # Начало аналитического сегмента
+                if current_segment:
+                    analytic_segments.append(current_segment)
+                    current_segment = []
+                
+                # Добавляем аналитический путь
+                segment_x = [p[0] for p in node.analytic_path]
+                segment_y = [p[1] for p in node.analytic_path]
+                analytic_segments.append(list(zip(segment_x, segment_y)))
+            else:
+                # Обычная точка
+                regular_x.append(node.x)
+                regular_y.append(node.y)
+                current_segment.append((node.x, node.y))
+        
+        if current_segment:
+            analytic_segments.append(current_segment)
+        
+        # Рисуем обычные точки
+        plt.plot(regular_x, regular_y, 'bo', markersize=3, alpha=0.5, label='Обычные узлы')
+        
+        # Рисуем аналитические сегменты разными цветами
+        colors = ['red', 'green', 'purple', 'orange', 'cyan']
+        for i, segment in enumerate(analytic_segments):
+            if segment:
+                seg_x, seg_y = zip(*segment)
+                color = colors[i % len(colors)]
+                plt.plot(seg_x, seg_y, color=color, linewidth=3, 
+                        label=f'Аналитический сегмент {i+1}')
+                plt.plot(seg_x, seg_y, 'o', color=color, markersize=2)
+    
+    # Старт и цель
+    plt.plot(start[0], start[1], 'go', markersize=12, label='Старт', markeredgecolor='black')
+    plt.plot(goal[0], goal[1], 'ro', markersize=12, label='Цель', markeredgecolor='black')
+    
+    # Ориентация
+    arrow_length = 2.0
+    plt.arrow(start[0], start[1], 
+            arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
+            head_width=0.8, fc='green', ec='green', linewidth=2)
+    plt.arrow(goal[0], goal[1],
+            arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
+            head_width=0.8, fc='red', ec='red', linewidth=2)
+    
+    plt.legend()
+    plt.grid(True)
+    plt.title('Hybrid A* Path с аналитическими расширениями')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.show()
+
+def print_path_statistics(path: List[Node]):
+    """Вывод статистики по пути"""
+    if not path:
+        print("Путь пуст")
+        return
+    
+    analytic_segments = 0
+    analytic_points = 0
+    regular_points = 0
+    
+    for node in path:
+        if node.analytic_path:
+            analytic_segments += 1
+            analytic_points += len(node.analytic_path)
+        else:
+            regular_points += 1
+    
+    print("=== СТАТИСТИКА ПУТИ ===")
+    print(f"Всего точек: {len(path)}")
+    print(f"Обычные узлы: {regular_points}")
+    print(f"Аналитические сегменты: {analytic_segments}")
+    print(f"Точек в аналитических путях: {analytic_points}")
+    print(f"Общая длина пути: {path[-1].g:.2f} м")
+    
+    if analytic_segments > 0:
+        coverage = analytic_points / (regular_points + analytic_points) * 100
+        print(f"Покрытие аналитическим путем: {coverage:.1f}%")
+
+    # Пример использования
 def create_test_grid():
     """Создание тестовой карты"""
     grid = np.zeros((50, 50))
     
     # Добавление препятствий
-    grid[5:15, 0:33] = 1  # прямоугольное препятствие
+    grid[15:25, 0:33] = 1  # прямоугольное препятствие
     #grid[21:35, 15:50] = 1  # прямоугольное препятствие
     #//grid[11:15, 11:30] = 1  # стена
     
@@ -850,11 +957,11 @@ def visualize_path(grid:np.ndarray, path, start, goal):
     # Ориентация
     arrow_length = 2.0
     plt.arrow(start[0], start[1], 
-              arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
-              head_width=0.5, fc='g', ec='g')
+            arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
+            head_width=0.5, fc='g', ec='g')
     plt.arrow(goal[0], goal[1],
-              arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
-              head_width=0.5, fc='r', ec='r')
+            arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
+            head_width=0.5, fc='r', ec='r')
     
     plt.legend()
     
@@ -870,26 +977,27 @@ def visualize_path(grid:np.ndarray, path, start, goal):
 
 # Демонстрация
 if __name__ == "__main__":
-
-    # Создание карты
     grid = create_test_grid()
+    planner = HybridAStar(grid, resolution=1.0)
     
-    # Инициализация планировщика
-    grid_resolution = 1
-    planner = HybridAStar(grid, resolution=grid_resolution)
-    
-    # Задание старта и цели
-    start = (0.0, 0.0, math.radians(0))  # (x, y, theta)
+    start = (0.0, 0.0, math.radians(0))
     goal = (40.0, 40.0, math.radians(90))
     
-    # Поиск пути
     path = planner.search(start, goal)
     
     if path:
         print(f"Путь найден! Длина: {len(path)} узлов")
         print(f"Общая стоимость: {path[-1].g:.2f}")
-        planner.print_cache_stats()  # Показываем статистику кэша
-        # Визуализация
-        visualize_path(grid, path, start, goal)
+        
+        # Выводим статистику
+        print_path_statistics(path)
+        
+        # Показываем детали аналитических расширений
+        for i, node in enumerate(path):
+            if node.analytic_path:
+                print(f"Узел {i}: аналитический путь с {len(node.analytic_path)} точками")
+        
+        # Визуализируем
+        visualize_path_with_analytic(grid, path, start, goal)
     else:
         print("Путь не найден!")
