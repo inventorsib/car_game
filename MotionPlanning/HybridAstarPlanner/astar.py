@@ -209,9 +209,9 @@ def extract_path(closed_set, n_start, n_goal, P):
 
 
 def get_motion():
-    # motion = [[-1, 0], [-1, 1], [0, 1], [1, 1],
-    #           [1, 0], [1, -1], [0, -1], [-1, -1]]
-    motion = [[0, 1], [1, 1], [1, 0]]
+    motion = [[-1, 0], [-1, 1], [0, 1], [1, 1],
+              [1, 0], [1, -1], [0, -1], [-1, -1]]
+
     return motion
 
 
