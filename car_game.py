@@ -1,3 +1,5 @@
+import heapq
+from typing import Tuple, List
 import pygame
 import math
 import sys
@@ -23,101 +25,242 @@ GREEN = (0, 255, 0)
 YELLOW = (255, 255, 0)
 BROWN = (139, 69, 19)
 PURPLE = (128, 0, 128)
+ORANGE = (255, 165, 0)
 
-# Path Planner
-class PathPlanner:
 
-    def __init__(self):
-        self.planned_path = []
-        self.planning_in_progress = False
-        self.planning_result = None
-       
-    def plan_path(self, start_x, start_y, start_yaw, goal_x, goal_y, goal_yaw, obstacles):
-        """Plan path using Hybrid A* algorithm"""
-        self.planning_in_progress = True
-       
-        try:
-            # Convert obstacles to format for Hybrid A*
-            ox, oy = [], []
-            for obstacle in obstacles:
-                obstacle_points = obstacle.get_hybrid_astar_obstacle_points()
-                for point in obstacle_points:
-                    ox.append(point[0])
-                    oy.append(point[1])
-           
-            # Add boundary obstacles
-            boundary_margin = 20
-            for x in range(0, WIDTH, 10):
-                ox.append(x)
-                oy.append(boundary_margin)
-                ox.append(x)
-                oy.append(HEIGHT - boundary_margin)
-            for y in range(0, HEIGHT, 10):
-                ox.append(boundary_margin)
-                oy.append(y)
-                ox.append(WIDTH - boundary_margin)
-                oy.append(y)
-           
-            # Call Hybrid A* planner
-            path = hastar.hybrid_astar_planning(
-                start_x, start_y, start_yaw,
-                goal_x, goal_y, goal_yaw,
-                ox, oy, hastar.C.XY_RESO, hastar.C.YAW_RESO
-            )
-           
-            self.planning_result = path
-            if path:
-                self.planned_path = list(zip(path.x, path.y))
-            else:
-                self.planned_path = []
-               
-        except Exception as e:
-            print(f"Path planning error: {e}")
-            self.planned_path = []
-            self.planning_result = None
-           
-        self.planning_in_progress = False
-        return self.planned_path
-   
-    def draw(self, surface):
-        """Draw planned path"""
-        if len(self.planned_path) > 1:
-            # Draw the main path
-            for i in range(1, len(self.planned_path)):
-                start_pos = self.planned_path[i-1]
-                end_pos = self.planned_path[i]
-                pygame.draw.line(surface, RED, start_pos, end_pos, 3)
-           
-            # Draw path points
-            for point in self.planned_path:
-                pygame.draw.circle(surface, BLACK, (int(point[0]), int(point[1])), 3)
-           
-        # Draw start and goal markers
-        if len(self.planned_path) > 0:
-            # Start point
-            pygame.draw.circle(surface, BLUE, (int(self.planned_path[0][0]), int(self.planned_path[0][1])), 8)
+# A* Node class
+class Node:
+    def __init__(self, x, y):
+        self.x = x 
+        self.y = y
+        self.f = 0
+        self.g = 0
+        self.h = 0
+        self.neighbors = []
+        self.previous = None
+        self.obstacle = False
+        self.in_open_set = False
+        self.in_closed_set = False
+
+    def add_neighbors(self, grid, columns, rows):
+        neighbor_x = self.x
+        neighbor_y = self.y
+    
+        # 4-directional movement
+        if neighbor_x < columns - 1:
+            self.neighbors.append(grid[neighbor_x+1][neighbor_y])
+        if neighbor_x > 0:
+            self.neighbors.append(grid[neighbor_x-1][neighbor_y])
+        if neighbor_y < rows - 1:
+            self.neighbors.append(grid[neighbor_x][neighbor_y + 1])
+        if neighbor_y > 0: 
+            self.neighbors.append(grid[neighbor_x][neighbor_y - 1])
+        
+        # 8-directional movement (diagonals)
+        if neighbor_x > 0 and neighbor_y > 0:
+            self.neighbors.append(grid[neighbor_x-1][neighbor_y-1])
+        if neighbor_x < columns - 1 and neighbor_y > 0:
+            self.neighbors.append(grid[neighbor_x+1][neighbor_y-1])
+        if neighbor_x > 0 and neighbor_y < rows - 1:
+            self.neighbors.append(grid[neighbor_x-1][neighbor_y+1])
+        if neighbor_x < columns - 1 and neighbor_y < rows - 1:
+            self.neighbors.append(grid[neighbor_x+1][neighbor_y+1])
+
+    def __lt__(self, other):
+        return self.f < other.f
+
+# A* Pathfinder class
+class AStarPathfinder:
+    def __init__(self, grid_size=20):
+        self.grid_size = grid_size
+        self.cols = WIDTH // grid_size
+        self.rows = HEIGHT // grid_size
+        self.grid = None
+        self.path = []
+        
+    def create_grid(self):
+        """Create grid based on current obstacles"""
+        self.grid = []
+        for i in range(self.cols):
+            self.grid.append([])
+            for j in range(self.rows):
+                self.grid[-1].append(Node(i, j))
+        return self.grid
+    
+    def update_grid_with_obstacles(self, obstacles):
+        """Update grid with obstacle information"""
+        if self.grid is None:
+            self.create_grid()
             
-            # Goal point with direction indicator
-            goal_x, goal_y = self.planned_path[-1]
-            pygame.draw.circle(surface, RED, (int(goal_x), int(goal_y)), 8)
+        # Reset grid
+        for i in range(self.cols):
+            for j in range(self.rows):
+                self.grid[i][j].obstacle = False
+                self.grid[i][j].neighbors = []
+        
+        # Mark obstacles
+        for obstacle in obstacles:
+            self.mark_obstacle_in_grid(obstacle)
             
-            # Draw simple direction line from goal
-            if len(self.planned_path) > 1:
-                prev_x, prev_y = self.planned_path[-2]
+        # Update neighbors
+        for i in range(self.cols):
+            for j in range(self.rows):
+                self.grid[i][j].add_neighbors(self.grid, self.cols, self.rows)
                 
-                # Calculate direction and draw line
-                dir_x = goal_x - prev_x
-                dir_y = goal_y - prev_y
-                length = math.sqrt(dir_x*dir_x + dir_y*dir_y)
-                
-                if length > 0:
-                    # Normalize and scale
-                    dir_x, dir_y = dir_x/length * 20, dir_y/length * 20
+        return self.grid
+    
+    def mark_obstacle_in_grid(self, obstacle):
+        """Mark obstacle area in grid"""
+        if obstacle.type == "rectangle":
+            # Convert obstacle rectangle to grid coordinates
+            left = max(0, int((obstacle.x - obstacle.width//2) / self.grid_size))
+            right = min(self.cols - 1, int((obstacle.x + obstacle.width//2) / self.grid_size))
+            top = max(0, int((obstacle.y - obstacle.height//2) / self.grid_size))
+            bottom = min(self.rows - 1, int((obstacle.y + obstacle.height//2) / self.grid_size))
+            
+            for i in range(left, right + 1):
+                for j in range(top, bottom + 1):
+                    self.grid[i][j].obstacle = True
                     
-                    # Draw direction line
-                    end_x = goal_x + dir_x
-                    end_y = goal_y + dir_y
-                    pygame.draw.line(surface, RED, (goal_x, goal_y), (end_x, end_y), 3)
+        else:  # circle
+            center_x = obstacle.x / self.grid_size
+            center_y = obstacle.y / self.grid_size
+            radius = obstacle.radius / self.grid_size
+            
+            left = max(0, int(center_x - radius))
+            right = min(self.cols - 1, int(center_x + radius))
+            top = max(0, int(center_y - radius))
+            bottom = min(self.rows - 1, int(center_y + radius))
+            
+            for i in range(left, right + 1):
+                for j in range(top, bottom + 1):
+                    dist = math.sqrt((i - center_x)**2 + (j - center_y)**2)
+                    if dist <= radius:
+                        self.grid[i][j].obstacle = True
+    
+    def world_to_grid(self, world_x, world_y):
+        """Convert world coordinates to grid coordinates"""
+        grid_x = int(world_x / self.grid_size)
+        grid_y = int(world_y / self.grid_size)
+        return max(0, min(self.cols - 1, grid_x)), max(0, min(self.rows - 1, grid_y))
+    
+    def grid_to_world(self, grid_x, grid_y):
+        """Convert grid coordinates to world coordinates"""
+        world_x = grid_x * self.grid_size + self.grid_size // 2
+        world_y = grid_y * self.grid_size + self.grid_size // 2
+        return world_x, world_y
+    
+    def find_path(self, start_world, end_world, obstacles):
+        """Find path from start to end using A*"""
+        # Update grid with current obstacles
+        self.update_grid_with_obstacles(obstacles)
+        
+        # Convert world coordinates to grid coordinates
+        start_grid = self.world_to_grid(start_world[0], start_world[1])
+        end_grid = self.world_to_grid(end_world[0], end_world[1])
+        
+        start_node = self.grid[start_grid[0]][start_grid[1]]
+        end_node = self.grid[end_grid[0]][end_grid[1]]
+        
+        # Check if start or end is in obstacle
+        if start_node.obstacle or end_node.obstacle:
+            return []
+        
+        # Initialize sets
+        open_set = []
+        closed_set = set()
+        
+        # Reset node states
+        for i in range(self.cols):
+            for j in range(self.rows):
+                self.grid[i][j].g = float('inf')
+                self.grid[i][j].f = float('inf')
+                self.grid[i][j].previous = None
+                self.grid[i][j].in_open_set = False
+                self.grid[i][j].in_closed_set = False
+        
+        # Initialize start node
+        start_node.g = 0
+        start_node.h = self.heuristic(start_node, end_node)
+        start_node.f = start_node.g + start_node.h
+        heapq.heappush(open_set, (start_node.f, id(start_node), start_node))
+        start_node.in_open_set = True
+        
+        while open_set:
+            current_f, _, current_node = heapq.heappop(open_set)
+            current_node.in_open_set = False
+            
+            if current_node == end_node:
+                return self.reconstruct_path(current_node)
+            
+            current_node.in_closed_set = True
+            closed_set.add(current_node)
+            
+            for neighbor in current_node.neighbors:
+                if neighbor.obstacle or neighbor.in_closed_set:
+                    continue
+                
+                tentative_g = current_node.g + self.distance(current_node, neighbor)
+                
+                if tentative_g < neighbor.g:
+                    neighbor.previous = current_node
+                    neighbor.g = tentative_g
+                    neighbor.h = self.heuristic(neighbor, end_node)
+                    neighbor.f = neighbor.g + neighbor.h
+                    
+                    if not neighbor.in_open_set:
+                        heapq.heappush(open_set, (neighbor.f, id(neighbor), neighbor))
+                        neighbor.in_open_set = True
+        
+        return []  # No path found
+    
+    def heuristic(self, node_a, node_b):
+        """Manhattan distance heuristic"""
+        return abs(node_a.x - node_b.x) + abs(node_a.y - node_b.y)
+    
+    def distance(self, node_a, node_b):
+        """Distance between nodes (1 for adjacent, sqrt(2) for diagonal)"""
+        dx = abs(node_a.x - node_b.x)
+        dy = abs(node_a.y - node_b.y)
+        if dx == 1 and dy == 1:
+            return math.sqrt(2)
+        return 1
+    
+    def reconstruct_path(self, end_node):
+        """Reconstruct path from end node to start"""
+        path = []
+        current = end_node
+        while current:
+            world_x, world_y = self.grid_to_world(current.x, current.y)
+            path.append((world_x, world_y))
+            current = current.previous
+        return path[::-1]  # Reverse to get start to end
+    
+    def draw_grid(self, surface):
+        """Draw the A* grid for debugging"""
+        if self.grid is None:
+            return
+            
+        for i in range(self.cols):
+            for j in range(self.rows):
+                world_x, world_y = self.grid_to_world(i, j)
+                rect = pygame.Rect(world_x - self.grid_size//2, world_y - self.grid_size//2, 
+                                 self.grid_size, self.grid_size)
+                
+                if self.grid[i][j].obstacle:
+                    pygame.draw.rect(surface, (200, 100, 100, 128), rect)
+                else:
+                    pygame.draw.rect(surface, (200, 200, 200, 50), rect, 1)
+    
+    def draw_path(self, surface, path):
+        """Draw the A* path"""
+        if len(path) > 1:
+            for i in range(len(path) - 1):
+                pygame.draw.line(surface, GREEN, path[i], path[i+1], 3)
+            
+            # Draw path points
+            for point in path:
+                pygame.draw.circle(surface, LIGHT_GREEN, (int(point[0]), int(point[1])), 4)
 
 
 # Obstacles
@@ -448,17 +591,18 @@ def fill_line_target_trajectory(controller:Controller):
 car = Car()
 obstacles = generate_obstacles(8)
 controller = Controller()
-path_planner = PathPlanner()
 
 fill_line_target_trajectory(controller)
 
 
 
 # Main game loop
+planning_requested = False
 clock = pygame.time.Clock()
 running = True
 
 while running:
+
     # Event handling
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -472,6 +616,18 @@ while running:
             elif event.key == pygame.K_t:
                 # Toggle control mode
                 controller.control_mode = "follow" if controller.control_mode == "manual" else "manual"
+            elif event.key == pygame.K_p:
+                # Plan path with A*
+                planning_requested = True
+            elif event.key == pygame.K_g:
+                # Set goal to mouse position
+                goal_x, goal_y = pygame.mouse.get_pos()
+                planning_requested = True
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:  # Left click
+                goal_x, goal_y = event.pos
+                planning_requested = True
+
     # Get key states
     keys = pygame.key.get_pressed()
    
@@ -523,12 +679,7 @@ while running:
             car.steering_angle = car.steering_angle * 0.7 + target_steering * 0.3
    
     goal_x, goal_y, goal_yaw = 500, 500, 0
-    #! Path planing
-    path_planner.plan_path(
-                        car.x, car.y, car.angle,
-                        goal_x, goal_y, goal_yaw,
-                        obstacles
-                    )
+
 
     #! Updating
     # Update car state
@@ -559,9 +710,6 @@ while running:
     # Draw car
     car.draw(screen)
     controller.draw(screen)
-
-    # Draw path
-    path_planner.draw(screen)
    
     # Display information
     font = pygame.font.SysFont(None, 24)

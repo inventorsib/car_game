@@ -5,6 +5,8 @@ from typing import Tuple, List, Optional, Dict
 import matplotlib.pyplot as plt
 from math import tan, atan2, acos, pi, sqrt, cos, sin
 
+gcounter = 1
+gcounter2 = 1
 
 class Node:
     """Узел для Hybrid A*"""
@@ -528,7 +530,32 @@ class HybridAStar:
         self.collision_checker = CollisionChecker(grid, resolution)
         self.successor_cache = SuccessorCache()
 
-    
+        #  ДЛЯ ОТЛАДКИ: статистика и визуализация
+        self.debug_data = {
+            'iterations': 0,
+            'nodes_expanded': 0,
+            'analytic_attempts': 0,
+            'analytic_successes': 0,
+            'closed_set_size': 0,
+            'open_list_size': [],
+            'best_f_values': []
+        }
+        self.visualization_interval = 150  # Частота визуализации
+
+
+    def is_dubins_path_collision_free(self, params: Params, step_size: float = 0.5) -> bool:
+        """
+        Проверка столкновений вдоль пути Дубенса
+        """
+        # Генерируем точки вдоль пути с мелким шагом
+        points = self.dubins.generate_path_points(params, int(params.len / step_size))
+        
+        for point in points:
+            x, y, theta = point
+            if self.is_collision(x, y):
+                return False
+        return True
+
     def heuristic(self, node: Node, goal: Node):
         """Эвристика с кэшированием"""
         start_config = (node.x, node.y, node.theta)
@@ -548,7 +575,8 @@ class HybridAStar:
     def _generate_successors_impl(self, node: Node) -> List[Node]:
         """Реальная генерация преемников (без кэширования)"""
         successors = []
-        steering_angles = [-self.max_steering_angle, 0, self.max_steering_angle]
+        msa = self.max_steering_angle
+        steering_angles = [-msa, 0, msa]
         
         # Адаптивные шаги
         if node.h < 5.0:
@@ -556,7 +584,7 @@ class HybridAStar:
         else:
             step_sizes = [1.0, 2.0, 3.0]
 
-        step_sizes = [0.25, 0.5, 1.0]
+        step_sizes =  [2.5, 5.0]
 
         # Пакетная проверка столкновений для всех потенциальных преемников
         potential_points = []
@@ -626,6 +654,10 @@ class HybridAStar:
     
     def search(self, start: Tuple[float, float, float], 
                goal: Tuple[float, float, float]) -> List[Node]:
+        #  ДЛЯ ОТЛАДКИ: сброс статистики
+        self.debug_data = {k: 0 if k != 'open_list_size' and k != 'best_f_values' else [] 
+                          for k in self.debug_data}
+        
         start_node = Node(start[0], start[1], start[2])
         goal_node = Node(goal[0], goal[1], goal[2])
         
@@ -639,11 +671,22 @@ class HybridAStar:
         
         node_counter = 0  # Счетчик для отслеживания интервала расширения
         
+        #  ДЛЯ ОТЛАДКИ: данные для визуализации
+        all_expanded_nodes = []  # Все раскрытые узлы для визуализации
+
         while open_list:
+            self.debug_data['iterations'] += 1
+            self.debug_data['open_list_size'].append(len(open_list))
+            
             _, current = heapq.heappop(open_list)
+            
+            #  ДЛЯ ОТЛАДКИ: отслеживаем лучшую f-стоимость
+            self.debug_data['best_f_values'].append(current.f)
             
             # Проверка достижения цели
             if self.is_goal_reached(current, goal_node):
+                print(f"🎯 ЦЕЛЬ ДОСТИГНУТА на итерации {self.debug_data['iterations']}!")
+                self._print_search_statistics()
                 return self.reconstruct_path(current)
             
             current_state = self.discretize_state(current)
@@ -651,17 +694,41 @@ class HybridAStar:
                 continue
                 
             closed_set.add(current_state)
+            self.debug_data['closed_set_size'] = len(closed_set)
+            
+            #  ДЛЯ ОТЛАДКИ: сохраняем узел для визуализации
+            all_expanded_nodes.append(current)
+            
             node_counter += 1
+            
+            if self.debug_data['iterations'] < 100:
+                self.visualization_interval = 1
+            else:
+                self.visualization_interval = 1
+
+
+            #  ДЛЯ ОТЛАДКИ: визуализация процесса каждые N итераций
+            if self.debug_data['iterations'] % self.visualization_interval == 0:
+                self._visualize_search_process(all_expanded_nodes, open_list, current, 
+                                             start, goal, self.debug_data['iterations'])
             
             # АНАЛИТИЧЕСКОЕ РАСШИРЕНИЕ - пробуем каждый N-й узел
             if node_counter % self.expansion_interval == 0:
+                self.debug_data['analytic_attempts'] += 1
                 analytic_node = self.analytic_expansion(current, goal_node)
                 if analytic_node and not self.is_collision(analytic_node.x, analytic_node.y):
+                    self.debug_data['analytic_successes'] += 1
+                    print(f"АНАЛИТИЧЕСКОЕ РАСШИРЕНИЕ УСПЕШНО! Прыжок к цели с узла ({current.x:.1f}, {current.y:.1f})")
                     # Нашли прямой путь до цели!
                     return self.reconstruct_path(analytic_node)
+                elif analytic_node:
+                    print(f"Аналитическое расширение: путь через препятствие")
             
             # Обычная генерация преемников
-            for successor in self.get_successors(current):
+            successors = self.get_successors(current)
+            self.debug_data['nodes_expanded'] += len(successors)
+            
+            for successor in successors:
                 successor_state = self.discretize_state(successor)
                 
                 if successor_state in closed_set:
@@ -675,7 +742,114 @@ class HybridAStar:
                 visited[successor_state] = successor.g
                 heapq.heappush(open_list, (successor.f, successor))
         
+        print("ПУТЬ НЕ НАЙДЕН!")
+        self._print_search_statistics()
         return []
+    
+    def _print_search_statistics(self):
+        """Вывод статистики поиска"""
+        print("\n=== СТАТИСТИКА ПОИСКА ===")
+        print(f"Всего итераций: {self.debug_data['iterations']}")
+        print(f"Раскрыто узлов: {self.debug_data['nodes_expanded']}")
+        print(f"Размер закрытого множества: {self.debug_data['closed_set_size']}")
+        print(f"Попыток аналитического расширения: {self.debug_data['analytic_attempts']}")
+        print(f"Успешных аналитических расширений: {self.debug_data['analytic_successes']}")
+        
+        if self.debug_data['analytic_attempts'] > 0:
+            success_rate = (self.debug_data['analytic_successes'] / 
+                          self.debug_data['analytic_attempts'] * 100)
+            print(f"Эффективность аналитического расширения: {success_rate:.1f}%")
+    
+    def _visualize_search_process(self, expanded_nodes: List[Node], open_list: list, 
+                                current: Node, start, goal, iteration: int):
+        """Визуализация процесса поиска для отладки"""
+        #plt.figure(figsize=(16, 12))
+        plt.close('all')
+        # 1. Основная карта
+        #plt.subplot(1, 1, 1)
+        plt.imshow(self.grid, cmap='Greys', origin='lower', alpha=0.7)
+        
+        #  Раскрытые узлы (закрытое множество)
+        exp_x = [node.x for node in expanded_nodes]
+        exp_y = [node.y for node in expanded_nodes]
+        plt.scatter(exp_x, exp_y, c='red', s=3, alpha=0.4, label='Раскрытые узлы')
+        
+        # Открытые узлы (приоритетная очередь)
+        open_x = [node.x for _, node in open_list[:500]]  # Первые 500 узлов
+        open_y = [node.y for _, node in open_list[:500]]
+        plt.scatter(open_x, open_y, c='green', s=5, alpha=0.6, label='Открытые узлы')
+        
+        # Текущий узел
+        plt.plot(current.x, current.y, 'yo', markersize=10, label='Текущий узел')
+        
+        # Старт и цель
+        plt.plot(start[0], start[1], 'go', markersize=12, label='Старт')
+        plt.plot(goal[0], goal[1], 'ro', markersize=12, label='Цель')
+        
+        # Ориентация
+        arrow_length = 2.0
+        plt.arrow(current.x, current.y, 
+                 arrow_length * math.cos(current.theta), arrow_length * math.sin(current.theta),
+                 head_width=0.8, fc='yellow', ec='black', linewidth=2)
+        
+        plt.title(f'Процесс поиска (итерация {iteration})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        '''
+        # 2. График размера открытого списка
+        plt.subplot(2, 2, 2)
+        plt.plot(self.debug_data['open_list_size'], 'b-', linewidth=2)
+        plt.xlabel('Итерация')
+        plt.ylabel('Размер открытого списка')
+        plt.title('Размер приоритетной очереди')
+        plt.grid(True, alpha=0.3)
+        
+        # 3. График лучшей f-стоимости
+        plt.subplot(2, 2, 3)
+        plt.plot(self.debug_data['best_f_values'], 'g-', linewidth=2)
+        plt.xlabel('Итерация')
+        plt.ylabel('Лучшая f-стоимость')
+        plt.title('Динамика лучшей стоимости')
+        plt.grid(True, alpha=0.3)
+        
+        # 4. Визуализация преемников текущего узла
+        plt.subplot(2, 2, 4)
+        plt.imshow(self.grid, cmap='Greys', origin='lower', alpha=0.7)
+        '''
+        # Показываем преемников текущего узла
+        successors = self.get_successors(current)
+        succ_x = [succ.x for succ in successors]
+        succ_y = [succ.y for succ in successors]
+        
+        plt.scatter(succ_x, succ_y, c='purple', s=50, alpha=0.8, label='Преемники')
+        plt.plot(current.x, current.y, 'yo', markersize=12, label='Текущий узел')
+        
+        # Стрелки к преемникам
+        for succ in successors:
+            plt.arrow(current.x, current.y, 
+                     succ.x - current.x, succ.y - current.y,
+                     head_width=0.3, fc='purple', ec='purple', alpha=0.5)
+        
+        plt.title(' Преемники текущего узла')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        global gcounter2
+        plt.savefig('stat/'+str(gcounter2)+'_plot.png')
+        gcounter2 = gcounter2 + 1
+        # plt.show()
+        
+        #  Детальная информация о текущем узле
+        print(f"\n Итерация {iteration}:")
+        print(f"   Текущий узел: ({current.x:.1f}, {current.y:.1f}, {math.degrees(current.theta):.1f}°)")
+        print(f"   g-стоимость: {current.g:.2f}, h-стоимость: {current.h:.2f}, f-стоимость: {current.f:.2f}")
+        print(f"   Количество преемников: {len(successors)}")
+        print(f"   Размер открытого списка: {len(open_list)}")
+        print(f"   Размер закрытого множества: {self.debug_data['closed_set_size']}")
+
+    # ... (остальные методы класса HybridAStar остаются без изменений) ...
     
     def is_goal_reached(self, node: Node, goal: Node, pos_tolerance: float = 0.5, 
                        angle_tolerance: float = math.radians(15)) -> bool:
@@ -709,6 +883,10 @@ class HybridAStar:
         
         if params is None or length > self.max_analytic_expansion_distance * 1.5:
             return None
+        
+        #  ДЛЯ ОТЛАДКИ: визуализация аналитического расширения
+        #if self.debug_data['iterations'] % self.visualization_interval == 0:
+        #    self._visualize_analytic_expansion(node, goal, params, length, path_type)
         
         # Проверяем, что путь свободен от препятствий
         if not self.is_dubins_path_collision_free(params):
@@ -828,73 +1006,161 @@ class HybridAStar:
             path.append(current)
             current = current.previousNode
         return path[::-1]
-    
 
-def visualize_path_with_analytic(grid: np.ndarray, path: List[Node], start, goal):
-    """Визуализация пути с выделением аналитических сегментов"""
-    plt.figure(figsize=(14, 12))
+
+    def _visualize_analytic_expansion(self, node: Node, goal: Node, params: Params, 
+                                    length: float, path_type: str):
+        """Визуализация аналитического расширения для отладки"""
+        plt.figure(figsize=(10, 8))
+        plt.imshow(self.grid, cmap='Greys', origin='lower', alpha=0.7)
+        
+        # Генерируем точки пути Дубенса
+        dubins_points = self.dubins.generate_path_points(params, 100)
+        dubins_x = [p[0] for p in dubins_points]
+        dubins_y = [p[1] for p in dubins_points]
+        
+        # Рисуем путь Дубенса
+        plt.plot(dubins_x, dubins_y, 'c-', linewidth=3, alpha=0.7, label='Путь Дубенса')
+        
+        # Узлы
+        plt.plot(node.x, node.y, 'yo', markersize=10, label='Текущий узел')
+        plt.plot(goal.x, goal.y, 'ro', markersize=10, label='Цель')
+        
+        # Центры окружностей Дубенса (если есть)
+        if hasattr(params, 'c1') and params.c1:
+            plt.plot(params.c1[0], params.c1[1], 'bx', markersize=8, label='Центр 1')
+        if hasattr(params, 'c2') and params.c2:
+            plt.plot(params.c2[0], params.c2[1], 'bx', markersize=8, label='Центр 2')
+        
+        plt.title(f' Аналитическое расширение: {path_type}\nДлина: {length:.2f} м')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        global gcounter
+        plt.savefig('aexp/'+str(gcounter)+'_plot.png')
+        gcounter = gcounter + 1
+        plt.close()  # закрыть фигуру
+        #plt.show()
+        
+        print(f"    Аналитическое расширение: {path_type}, длина {length:.2f} м")
+
+    # ... (остальные методы класса HybridAStar остаются без изменений) ...
+
+#  УЛУЧШЕННАЯ ВИЗУАЛИЗАЦИЯ ПУТИ
+def visualize_path_detailed(grid: np.ndarray, path: List[Node], start, goal, 
+                          planner: HybridAStar = None):
     
-    # Отображение карты
-    plt.imshow(grid, cmap='Greys', origin='lower')
+    # Если вы хотите начать "с чистого листа"
+    plt.clf()  # очистить текущую фигуру
+    plt.cla()  # очистить текущие оси
+    plt.close('all') 
+
+    # Или создать совершенно новую фигуру
+    plt.figure()
+
+    """Детальная визуализация пути с отладочной информацией"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # 1. Основной путь
+    ax1.imshow(grid, cmap='Greys', origin='lower', alpha=0.7)
     
     if path:
-        # Разделяем обычные точки и аналитические сегменты
-        regular_x, regular_y = [], []
+        # Разделяем обычные и аналитические сегменты
+        regular_segments = []
         analytic_segments = []
-        
         current_segment = []
-        for node in path:
-            if node.analytic_path:
-                # Начало аналитического сегмента
+        
+        for i, node in enumerate(path):
+            if node.analytic_path and len(node.analytic_path) > 0:
+                # Сохраняем текущий обычный сегмент
                 if current_segment:
-                    analytic_segments.append(current_segment)
+                    regular_segments.append(current_segment)
                     current_segment = []
                 
-                # Добавляем аналитический путь
-                segment_x = [p[0] for p in node.analytic_path]
-                segment_y = [p[1] for p in node.analytic_path]
-                analytic_segments.append(list(zip(segment_x, segment_y)))
+                # Добавляем аналитический сегмент
+                analytic_segments.append(node.analytic_path)
             else:
-                # Обычная точка
-                regular_x.append(node.x)
-                regular_y.append(node.y)
-                current_segment.append((node.x, node.y))
+                current_segment.append((node.x, node.y, node.theta))
         
         if current_segment:
-            analytic_segments.append(current_segment)
+            regular_segments.append(current_segment)
         
-        # Рисуем обычные точки
-        plt.plot(regular_x, regular_y, 'bo', markersize=3, alpha=0.5, label='Обычные узлы')
+        # Рисуем обычные сегменты
+        for i, segment in enumerate(regular_segments):
+            if segment:
+                seg_x = [p[0] for p in segment]
+                seg_y = [p[1] for p in segment]
+                ax1.plot(seg_x, seg_y, 'bo-', markersize=3, linewidth=2, 
+                        label='Обычные узлы' if i == 0 else "")
         
-        # Рисуем аналитические сегменты разными цветами
-        colors = ['red', 'green', 'purple', 'orange', 'cyan']
+        # Рисуем аналитические сегменты
+        colors = ['red', 'green', 'purple', 'orange']
         for i, segment in enumerate(analytic_segments):
             if segment:
-                seg_x, seg_y = zip(*segment)
+                seg_x = [p[0] for p in segment]
+                seg_y = [p[1] for p in segment]
                 color = colors[i % len(colors)]
-                plt.plot(seg_x, seg_y, color=color, linewidth=3, 
-                        label=f'Аналитический сегмент {i+1}')
-                plt.plot(seg_x, seg_y, 'o', color=color, markersize=2)
+                ax1.plot(seg_x, seg_y, color=color, linewidth=4, 
+                        label=f'Аналитический {i+1}')
+                ax1.plot(seg_x, seg_y, 'o', color=color, markersize=2)
     
     # Старт и цель
-    plt.plot(start[0], start[1], 'go', markersize=12, label='Старт', markeredgecolor='black')
-    plt.plot(goal[0], goal[1], 'ro', markersize=12, label='Цель', markeredgecolor='black')
+    ax1.plot(start[0], start[1], 'go', markersize=15, label='Старт', markeredgecolor='black')
+    ax1.plot(goal[0], goal[1], 'ro', markersize=15, label='Цель', markeredgecolor='black')
     
     # Ориентация
     arrow_length = 2.0
-    plt.arrow(start[0], start[1], 
-            arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
-            head_width=0.8, fc='green', ec='green', linewidth=2)
-    plt.arrow(goal[0], goal[1],
-            arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
-            head_width=0.8, fc='red', ec='red', linewidth=2)
+    ax1.arrow(start[0], start[1], 
+             arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
+             head_width=0.8, fc='green', ec='green', linewidth=2)
+    ax1.arrow(goal[0], goal[1],
+             arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
+             head_width=0.8, fc='red', ec='red', linewidth=2)
     
-    plt.legend()
-    plt.grid(True)
-    plt.title('Hybrid A* Path с аналитическими расширениями')
-    plt.xlabel('X')
-    plt.ylabel('Y')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title('Найденный путь')
+    ax1.set_xlabel('X')
+    ax1.set_ylabel('Y')
+    
+    # 2. Анализ качества пути
+    if path and len(path) > 1:
+        # Вычисляем кривизну пути
+        curvatures = []
+        distances = []
+        cumulative_distance = 0
+        
+        for i in range(1, len(path) - 1):
+            # Векторы между точками
+            dx1 = path[i].x - path[i-1].x
+            dy1 = path[i].y - path[i-1].y
+            dx2 = path[i+1].x - path[i].x
+            dy2 = path[i+1].y - path[i].y
+            
+            # Углы между векторами
+            angle1 = math.atan2(dy1, dx1)
+            angle2 = math.atan2(dy2, dx2)
+            angle_diff = min(abs(angle2 - angle1), 2 * math.pi - abs(angle2 - angle1))
+            
+            curvatures.append(angle_diff)
+            cumulative_distance += math.sqrt(dx1**2 + dy1**2)
+            distances.append(cumulative_distance)
+        
+        ax2.plot(distances, curvatures, 'r-', linewidth=2)
+        ax2.set_xlabel('Пройденное расстояние (м)')
+        ax2.set_ylabel('Кривизна пути (рад)')
+        ax2.set_title('Анализ плавности пути')
+        ax2.grid(True, alpha=0.3)
+        
+        # Статистика
+        avg_curvature = np.mean(curvatures) if curvatures else 0
+        max_curvature = np.max(curvatures) if curvatures else 0
+        ax2.text(0.05, 0.95, f'Средняя кривизна: {math.degrees(avg_curvature):.1f}°\n'
+                            f'Макс кривизна: {math.degrees(max_curvature):.1f}°',
+                transform=ax2.transAxes, bbox=dict(boxstyle="round", facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
     plt.show()
+
 
 def print_path_statistics(path: List[Node]):
     """Вывод статистики по пути"""
@@ -924,7 +1190,7 @@ def print_path_statistics(path: List[Node]):
         coverage = analytic_points / (regular_points + analytic_points) * 100
         print(f"Покрытие аналитическим путем: {coverage:.1f}%")
 
-    # Пример использования
+
 def create_test_grid():
     """Создание тестовой карты"""
     grid = np.zeros((50, 50))
@@ -936,46 +1202,7 @@ def create_test_grid():
     
     return grid
 
-def visualize_path(grid:np.ndarray, path, start, goal):
-    """Визуализация пути"""
-    plt.figure(figsize=(12, 10))
-    
-    # Отображение карты
-    plt.imshow(grid, cmap='Greys', origin='lower')
-    
-    if path:
-        # Отображение пути
-        path_x = [node.x for node in path]
-        path_y = [node.y for node in path]
-        plt.plot(path_x, path_y, 'b-', linewidth=2, label='Path')
-        plt.plot(path_x, path_y, 'bo', markersize=3)
-    
-    # Старт и цель
-    plt.plot(start[0], start[1], 'go', markersize=10, label='Start')
-    plt.plot(goal[0], goal[1], 'ro', markersize=10, label='Goal')
-    
-    # Ориентация
-    arrow_length = 2.0
-    plt.arrow(start[0], start[1], 
-            arrow_length * math.cos(start[2]), arrow_length * math.sin(start[2]),
-            head_width=0.5, fc='g', ec='g')
-    plt.arrow(goal[0], goal[1],
-            arrow_length * math.cos(goal[2]), arrow_length * math.sin(goal[2]),
-            head_width=0.5, fc='r', ec='r')
-    
-    plt.legend()
-    
-    grid_2d = np.shape(grid)
-    plt.xticks(np.arange(0, grid_2d[0], 5))  # шаг 1 от 0 до 10
-    plt.yticks(np.arange(0, grid_2d[1], 5))  # шаг 0.2 от -1 до 1
-
-    plt.grid(True) #grid_resolution
-    plt.title('Hybrid A* Path Planning')
-    plt.xlabel('X')
-    plt.ylabel('Y')
-    plt.show()
-
-# Демонстрация
+#  ОБНОВЛЕННАЯ ГЛАВНАЯ ФУНКЦИЯ
 if __name__ == "__main__":
     grid = create_test_grid()
     planner = HybridAStar(grid, resolution=1.0)
@@ -983,21 +1210,27 @@ if __name__ == "__main__":
     start = (0.0, 0.0, math.radians(0))
     goal = (40.0, 40.0, math.radians(90))
     
+    print("ЗАПУСК ПОИСКА ПУТИ...")
     path = planner.search(start, goal)
     
     if path:
-        print(f"Путь найден! Длина: {len(path)} узлов")
+        print(f"ПУТЬ НАЙДЕН! Длина: {len(path)} узлов")
         print(f"Общая стоимость: {path[-1].g:.2f}")
         
         # Выводим статистику
         print_path_statistics(path)
+        planner.print_cache_stats()
         
         # Показываем детали аналитических расширений
+        analytic_count = 0
         for i, node in enumerate(path):
             if node.analytic_path:
-                print(f"Узел {i}: аналитический путь с {len(node.analytic_path)} точками")
+                analytic_count += 1
+                print(f" Узел {i}: аналитический путь с {len(node.analytic_path)} точками")
         
-        # Визуализируем
-        visualize_path_with_analytic(grid, path, start, goal)
+        print(f"Всего аналитических сегментов: {analytic_count}")
+        
+        # Визуализируем с детальной информацией
+        visualize_path_detailed(grid, path, start, goal, planner)
     else:
         print("Путь не найден!")
