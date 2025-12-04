@@ -1,309 +1,307 @@
-import heapq
-from typing import Tuple, List
 import pygame
 import math
 import sys
 import random
 import numpy as np
+from typing import List, Tuple, Optional
+import dubins_path_planner
+
+import matplotlib.pyplot as plt
 
 # Initialize Pygame
 pygame.init()
-# Screen settings
 WIDTH, HEIGHT = 1300, 800
+STEP = 2
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Top-Down Car - Bicycle Model with Wheels + A* Pathfinding")
+pygame.display.set_caption("Car Obstacle Avoidance with Dubins Path")
+
 # Colors
 WHITE = (255, 255, 255)
 RED = (255, 0, 0)
 BLACK = (0, 0, 0)
 GRAY = (100, 100, 100)
-DARK_GRAY = (50, 50, 50)
 BLUE = (0, 0, 255)
 GREEN = (0, 255, 0)
 YELLOW = (255, 255, 0)
-BROWN = (139, 69, 19)
 PURPLE = (128, 0, 128)
 ORANGE = (255, 165, 0)
 CYAN = (0, 255, 255)
 LIGHT_GREEN = (144, 238, 144)
+DARK_RED = (139, 0, 0)
 
-# A* Node class
-class Node:
-    def __init__(self, x, y):
-        self.x = x 
-        self.y = y
-        self.f = 0
-        self.g = 0
-        self.h = 0
-        self.neighbors = []
-        self.previous = None
-        self.obstacle = False
-        self.in_open_set = False
-        self.in_closed_set = False
-
-    def add_neighbors(self, grid, columns, rows):
-        neighbor_x = self.x
-        neighbor_y = self.y
+class ArcGenerator:
+    """Генератор касательных дуг для объезда препятствий"""
     
-        # 4-directional movement
-        if neighbor_x < columns - 1:
-            self.neighbors.append(grid[neighbor_x+1][neighbor_y])
-        if neighbor_x > 0:
-            self.neighbors.append(grid[neighbor_x-1][neighbor_y])
-        if neighbor_y < rows - 1:
-            self.neighbors.append(grid[neighbor_x][neighbor_y + 1])
-        if neighbor_y > 0: 
-            self.neighbors.append(grid[neighbor_x][neighbor_y - 1])
+    @staticmethod
+    def generate_tangent_arc_points(O, R, P, R_arc, num_points=50):
+        """
+        Генерирует точки дуги от P до T по кратчайшему пути.
         
-        # 8-directional movement (diagonals)
-        if neighbor_x > 0 and neighbor_y > 0:
-            self.neighbors.append(grid[neighbor_x-1][neighbor_y-1])
-        if neighbor_x < columns - 1 and neighbor_y > 0:
-            self.neighbors.append(grid[neighbor_x+1][neighbor_y-1])
-        if neighbor_x > 0 and neighbor_y < rows - 1:
-            self.neighbors.append(grid[neighbor_x-1][neighbor_y+1])
-        if neighbor_x < columns - 1 and neighbor_y < rows - 1:
-            self.neighbors.append(grid[neighbor_x+1][neighbor_y+1])
-
-    def __lt__(self, other):
-        return self.f < other.f
-
-# A* Pathfinder class
-class AStarPathfinder:
-    def __init__(self, grid_size=20, safety_margin=2):
-        self.grid_size = grid_size
-        self.cols = WIDTH // grid_size
-        self.rows = HEIGHT // grid_size
-        self.grid = None
-        self.path = []
-        self.safety_margin = safety_margin  # Количество дополнительных клеток запаса
-        
-    def mark_obstacle_in_grid(self, obstacle):
-        """Mark obstacle area in grid with safety margin"""
-        if obstacle.type == "rectangle":
-            # Convert obstacle rectangle to grid coordinates with safety margin
-            left = max(0, int((obstacle.x - obstacle.width//2) / self.grid_size) - self.safety_margin)
-            right = min(self.cols - 1, int((obstacle.x + obstacle.width//2) / self.grid_size) + self.safety_margin)
-            top = max(0, int((obstacle.y - obstacle.height//2) / self.grid_size) - self.safety_margin)
-            bottom = min(self.rows - 1, int((obstacle.y + obstacle.height//2) / self.grid_size) + self.safety_margin)
+        Args:
+            O: (x, y) центр исходной окружности
+            R: радиус исходной окружности
+            P: (x, y) начальная точка
+            R_arc: радиус дуги скругления
+            num_points: количество точек для генерации дуги
             
-            for i in range(left, right + 1):
-                for j in range(top, bottom + 1):
-                    self.grid[i][j].obstacle = True
-                    
-        else:  # circle
-            center_x = obstacle.x / self.grid_size
-            center_y = obstacle.y / self.grid_size
-            radius = obstacle.radius / self.grid_size + self.safety_margin  # Увеличиваем радиус
+        Returns:
+            list: Список кортежей [(C, T, arc_points)] для каждого решения,
+                  где arc_points - список точек от P до T по дуге
+        """
+        
+        def find_tangent_arc_centers(O, R, P, R_arc):
+            """Находит центры дуг для внешнего касания"""
+            solutions = []
             
-            left = max(0, int(center_x - radius))
-            right = min(self.cols - 1, int(center_x + radius))
-            top = max(0, int(center_y - radius))
-            bottom = min(self.rows - 1, int(center_y + radius))
+            dx = P[0] - O[0]
+            dy = P[1] - O[1]
+            d = math.sqrt(dx*dx + dy*dy)
             
-            for i in range(left, right + 1):
-                for j in range(top, bottom + 1):
-                    dist = math.sqrt((i - center_x)**2 + (j - center_y)**2)
-                    if dist <= radius:
-                        self.grid[i][j].obstacle = True
-        
-    def create_grid(self):
-        """Create grid based on current obstacles"""
-        self.grid = []
-        for i in range(self.cols):
-            self.grid.append([])
-            for j in range(self.rows):
-                self.grid[-1].append(Node(i, j))
-        return self.grid
-    
-    def update_grid_with_obstacles(self, obstacles):
-        """Update grid with obstacle information"""
-        if self.grid is None:
-            self.create_grid()
+            if d < (R + R_arc):
+                return solutions
             
-        # Reset grid
-        for i in range(self.cols):
-            for j in range(self.rows):
-                self.grid[i][j].obstacle = False
-                self.grid[i][j].neighbors = []
-        
-        # Mark obstacles
-        for obstacle in obstacles:
-            self.mark_obstacle_in_grid(obstacle)
+            a = (d*d + (R + R_arc)**2 - R_arc**2) / (2*d)
+            h = math.sqrt((R + R_arc)**2 - a*a)
             
-        # Update neighbors
-        for i in range(self.cols):
-            for j in range(self.rows):
-                self.grid[i][j].add_neighbors(self.grid, self.cols, self.rows)
-                
-        return self.grid
-    
-    
-    def world_to_grid(self, world_x, world_y):
-        """Convert world coordinates to grid coordinates"""
-        grid_x = int(world_x / self.grid_size)
-        grid_y = int(world_y / self.grid_size)
-        return max(0, min(self.cols - 1, grid_x)), max(0, min(self.rows - 1, grid_y))
-    
-    def grid_to_world(self, grid_x, grid_y):
-        """Convert grid coordinates to world coordinates"""
-        world_x = grid_x * self.grid_size + self.grid_size // 2
-        world_y = grid_y * self.grid_size + self.grid_size // 2
-        return world_x, world_y
-    
-    def find_path(self, start_world, end_world, obstacles):
-        """Find path from start to end using A*"""
-        # Update grid with current obstacles
-        self.update_grid_with_obstacles(obstacles)
-        
-        # Convert world coordinates to grid coordinates
-        start_grid = self.world_to_grid(start_world[0], start_world[1])
-        end_grid = self.world_to_grid(end_world[0], end_world[1])
-        
-        start_node = self.grid[start_grid[0]][start_grid[1]]
-        end_node = self.grid[end_grid[0]][end_grid[1]]
-        
-        # Check if start or end is in obstacle
-        if start_node.obstacle or end_node.obstacle:
-            return []
-        
-        # Initialize sets
-        open_set = []
-        closed_set = set()
-        
-        # Reset node states
-        for i in range(self.cols):
-            for j in range(self.rows):
-                self.grid[i][j].g = float('inf')
-                self.grid[i][j].f = float('inf')
-                self.grid[i][j].previous = None
-                self.grid[i][j].in_open_set = False
-                self.grid[i][j].in_closed_set = False
-        
-        # Initialize start node
-        start_node.g = 0
-        start_node.h = self.heuristic(start_node, end_node)
-        start_node.f = start_node.g + start_node.h
-        heapq.heappush(open_set, (start_node.f, id(start_node), start_node))
-        start_node.in_open_set = True
-        
-        while open_set:
-            current_f, _, current_node = heapq.heappop(open_set)
-            current_node.in_open_set = False
+            C0_x = O[0] + a * dx / d
+            C0_y = O[1] + a * dy / d
             
-            if current_node == end_node:
-                return self.reconstruct_path(current_node)
+            perp_x = -dy * h / d
+            perp_y = dx * h / d
             
-            current_node.in_closed_set = True
-            closed_set.add(current_node)
+            C1 = (C0_x + perp_x, C0_y + perp_y)
+            C2 = (C0_x - perp_x, C0_y - perp_y)
             
-            for neighbor in current_node.neighbors:
-                if neighbor.obstacle or neighbor.in_closed_set:
+            for C in [C1, C2]:
+                vec_OC_x = C[0] - O[0]
+                vec_OC_y = C[1] - O[1]
+                len_OC = math.sqrt(vec_OC_x**2 + vec_OC_y**2)
+                if len_OC == 0:
                     continue
+                unit_OC_x = vec_OC_x / len_OC
+                unit_OC_y = vec_OC_y / len_OC
                 
-                tentative_g = current_node.g + self.distance(current_node, neighbor)
-                
-                if tentative_g < neighbor.g:
-                    neighbor.previous = current_node
-                    neighbor.g = tentative_g
-                    neighbor.h = self.heuristic(neighbor, end_node)
-                    neighbor.f = neighbor.g + neighbor.h
-                    
-                    if not neighbor.in_open_set:
-                        heapq.heappush(open_set, (neighbor.f, id(neighbor), neighbor))
-                        neighbor.in_open_set = True
+                T = (O[0] + unit_OC_x * R, O[1] + unit_OC_y * R)
+                solutions.append((C, T))
+            
+            return solutions
         
-        return []  # No path found
-    
-    def heuristic(self, node_a, node_b):
-        """Manhattan distance heuristic"""
-        return abs(node_a.x - node_b.x) + abs(node_a.y - node_b.y)
-    
-    def distance(self, node_a, node_b):
-        """Distance between nodes (1 for adjacent, sqrt(2) for diagonal)"""
-        dx = abs(node_a.x - node_b.x)
-        dy = abs(node_a.y - node_b.y)
-        if dx == 1 and dy == 1:
-            return 1#math.sqrt(2)*0.1
-        return 1
-    
-    def reconstruct_path(self, end_node):
-        """Reconstruct path from end node to start"""
-        path = []
-        current = end_node
-        while current:
-            world_x, world_y = self.grid_to_world(current.x, current.y)
-            path.append((world_x, world_y))
-            current = current.previous
-        return path[::-1]  # Reverse to get start to end
-    
-    def draw_grid(self, surface):
-        """Draw the A* grid for debugging"""
-        if self.grid is None:
-            return
+        def calculate_angle(point, center):
+            """Вычисляет угол точки относительно центра"""
+            dx = point[0] - center[0]
+            dy = point[1] - center[1]
+            return math.atan2(dy, dx)
+        
+        def normalize_angle(angle):
+            """Нормализует угол в диапазон [0, 2π]"""
+            return angle % (2 * math.pi)
+        
+        def get_shortest_arc_points(center, start_point, end_point, radius, num_points):
+            """Генерирует точки по кратчайшей дуге"""
+            start_angle = calculate_angle(start_point, center)
+            end_angle = calculate_angle(end_point, center)
             
-        for i in range(self.cols):
-            for j in range(self.rows):
-                world_x, world_y = self.grid_to_world(i, j)
-                rect = pygame.Rect(world_x - self.grid_size//2, world_y - self.grid_size//2, 
-                                 self.grid_size, self.grid_size)
+            # Нормализуем углы
+            start_angle_norm = normalize_angle(start_angle)
+            end_angle_norm = normalize_angle(end_angle)
+            
+            # Вычисляем разность углов в правильном направлении
+            angle_diff = end_angle_norm - start_angle_norm
+            
+            # Корректируем для выбора кратчайшего пути
+            if angle_diff > math.pi:
+                angle_diff -= 2 * math.pi
+            elif angle_diff < -math.pi:
+                angle_diff += 2 * math.pi
+            
+            # Генерируем точки дуги
+            points = []
+            for i in range(num_points + 1):
+                t = i / num_points
+                current_angle = start_angle + angle_diff * t
                 
-                if self.grid[i][j].obstacle:
-                    pygame.draw.rect(surface, (200, 100, 100, 128), rect)
-                else:
-                    pygame.draw.rect(surface, (200, 200, 200, 50), rect, 1)
-    
-    def draw_path(self, surface, path):
-        """Draw the A* path"""
-        if len(path) > 1:
-            for i in range(len(path) - 1):
-                pygame.draw.line(surface, GREEN, path[i], path[i+1], 3)
+                x = center[0] + radius * math.cos(current_angle)
+                y = center[1] + radius * math.sin(current_angle)
+                points.append((x, y))
             
-            # Draw path points
-            for point in path:
-                pygame.draw.circle(surface, LIGHT_GREEN, (int(point[0]), int(point[1])), 4)
+            return points
+        
+        solutions = []
+        arc_centers = find_tangent_arc_centers(O, R, P, R_arc)
+        
+        for C, T in arc_centers:
+            # Генерируем точки дуги от P до T
+            arc_points = get_shortest_arc_points(C, P, T, R_arc, num_points)
+            solutions.append((C, T, arc_points))
+        
+        return solutions
 
-# Obstacles (your existing Obstacle class remains the same)
 class Obstacle:
-    def __init__(self, x, y, obstacle_type="rectangle"):
+    def __init__(self, x, y, radius=None):
         self.x = x
         self.y = y
-        self.type = obstacle_type
-        self.width = random.randint(30, 80)
-        self.height = random.randint(30, 80)
-        self.radius = random.randint(20, 40)
-        self.color = random.choice([GRAY, DARK_GRAY])
+        self.radius = radius if radius else random.randint(25, 45)
+        self.safety_radius = self.radius + 40  # Радиус безопасности
+        self.color = (random.randint(100, 200), random.randint(100, 200), random.randint(100, 200))
        
     def draw(self, surface):
-        if self.type == "rectangle":
-            pygame.draw.rect(surface, self.color, (self.x - self.width//2, self.y - self.height//2, self.width, self.height))
-            pygame.draw.rect(surface, BLACK, (self.x - self.width//2, self.y - self.height//2, self.width, self.height), 2)
-        elif self.type == "circle":
-            pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), self.radius)
-            pygame.draw.circle(surface, BLACK, (int(self.x), int(self.y)), self.radius, 2)
+        # Основное препятствие
+        pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), self.radius)
+        pygame.draw.circle(surface, BLACK, (int(self.x), int(self.y)), self.radius, 2)
+        
+        # Зона безопасности
+        pygame.draw.circle(surface, (*self.color, 100), (int(self.x), int(self.y)), self.safety_radius, 2)
    
     def get_rect(self):
-        if self.type == "rectangle":
-            return pygame.Rect(self.x - self.width//2, self.y - self.height//2, self.width, self.height)
-        else:
-            return pygame.Rect(self.x - self.radius, self.y - self.radius, self.radius * 2, self.radius * 2)
+        return pygame.Rect(self.x - self.radius, self.y - self.radius, 
+                         self.radius * 2, self.radius * 2)
    
     def check_collision(self, car_corners):
-        obstacle_rect = self.get_rect()
-       
         for corner_x, corner_y in car_corners:
-            if obstacle_rect.collidepoint(corner_x, corner_y):
+            distance = math.sqrt((corner_x - self.x)**2 + (corner_y - self.y)**2)
+            if distance <= self.radius:
                 return True
-       
-        if self.type == "circle":
-            for corner_x, corner_y in car_corners:
-                distance = math.sqrt((corner_x - self.x)**2 + (corner_y - self.y)**2)
-                if distance <= self.radius:
-                    return True
-       
         return False
 
-# Controller (modified to use A* path)
+class ObstacleAvoidancePlanner:
+    """Упрощенный планировщик объезда препятствий"""
+    def __init__(self, nominal_trajectory_y=400):
+        self.nominal_trajectory_y = nominal_trajectory_y
+        self.safety_margin = 60  # Отступ от препятствий
+        
+    def find_optimal_avoidance(self, car_pos: Tuple[float, float], 
+                         car_angle: float, 
+                         obstacles: List[Obstacle]) -> List[Tuple[float, float]]:
+        start_x, start_y = car_pos
+        
+        # Номинальная траектория
+        nominal_path = [(x, self.nominal_trajectory_y) for x in np.arange(start_x, WIDTH, STEP)]
+        
+        # Ищем препятствия на пути
+        collision_obstacles = []
+        
+        for obstacle in obstacles:
+            for point in nominal_path:
+                dist = math.sqrt((point[0] - obstacle.x)**2 + (point[1] - obstacle.y)**2)
+                if dist < obstacle.safety_radius:
+                    collision_obstacles.append(obstacle)
+                    break
+        
+        # Если нет препятствий, возвращаем номинальный путь
+        if not collision_obstacles:
+            return nominal_path
+        
+        # Берем первое препятствие 
+        # TODO: брать ближайшее
+        obstacle = collision_obstacles[0]
+        
+        # Определяем точку входа и выхода из запретной зоны
+        entry_angle = math.atan2(self.nominal_trajectory_y - obstacle.y, -obstacle.safety_radius)
+        exit_angle = math.atan2(self.nominal_trajectory_y - obstacle.y, obstacle.safety_radius)
+        
+        sign = 1
+        # Определяем сторону объезда
+        if self.nominal_trajectory_y < obstacle.y:
+            # Движение по нижней дуге
+            start_angle = entry_angle
+            end_angle = exit_angle
+            sign = 1
+        else:
+            # Движение по верхней дуге
+            start_angle = -entry_angle
+            end_angle = -exit_angle
+            sign = -1
+
+        #! Update by Dubins connections
+        # TODO: bruteforce
+        #//for x_start in np.arange(obstacle.y - 100, obstacle.y - obstacle.safety_radius, 10):
+        #//    for angle_connect in np.arange(0, ) 
+
+        x_start_dub = obstacle.x - 175
+        y_start_dub = start_y
+
+        x_circle_dub = obstacle.x
+        y_circle_dub = obstacle.y - sign*obstacle.safety_radius
+
+        x_end_dub = obstacle.x + 175
+        y_end_dub = start_y
+
+        th_start = 0
+        th_circle = 0
+        th_end = 0
+
+        curvature = 1/car.max_turning_radius
+        path_x_to_zone, path_y_to_zone, _, _, _ = dubins_path_planner.plan_dubins_path(
+            x_start_dub, y_start_dub, th_start,
+            x_circle_dub, y_circle_dub, th_circle,
+            curvature, 0.01
+        )
+
+        path_x_from_zone, path_y_from_zone, _, _, _ = dubins_path_planner.plan_dubins_path(
+            x_circle_dub, y_circle_dub, th_circle,
+            x_end_dub, y_end_dub, th_end,
+            curvature, 0.01
+        )
+       
+        # Строим путь
+        full_path = []
+        
+        # 1. Номинальная траектория до точки входа
+        entry_x = x_start_dub #//obstacle.x + obstacle.safety_radius * math.cos(start_angle)
+        entry_y = y_start_dub  #//obstacle.y+ obstacle.safety_radius * math.sin(start_angle)
+        
+        for point in nominal_path:
+            if point[0] <= entry_x:
+                full_path.append(point)
+            else:
+                break
+        
+        # 2. Дубинс - выход на запретную зону
+        #//arc_points = 100
+        #//angle_step = (end_angle - start_angle) / arc_points
+        
+        for x, y in zip(path_x_to_zone, path_y_to_zone):
+            full_path.append((x, y))
+
+        # 3. Движение вдоль запретной зоны
+
+        # 4. Съезд с запретной зоны
+        for x, y in zip(path_x_from_zone, path_y_from_zone):
+            full_path.append((x, y))
+            exit_x = x
+
+        # 5. Номинальная траектория после точки выхода
+        #exit_x = obstacle.x + obstacle.safety_radius * math.cos(end_angle)
+        
+        for point in nominal_path:
+            if point[0] >= exit_x:
+                full_path.append(point)
+        
+        return full_path
+    
+    def draw_debug(self, surface, path):
+        """Отрисовка упрощенного пути"""
+        if len(path) > 1:
+            # Рисуем линии пути
+            pygame.draw.lines(surface, GREEN, False, path, 3)
+            
+            # Рисуем точки пути
+            for i, point in enumerate(path):
+                color = RED if i == 0 else BLUE if i == len(path) - 1 else PURPLE
+                pygame.draw.circle(surface, color, (int(point[0]), int(point[1])), 6)
+                
+                # Подписи точек
+                font = pygame.font.SysFont(None, 20)
+                if i == 0:
+                    label = "Start"
+                elif i == len(path) - 1:
+                    label = "End"
+                else:
+                    label = f"P{i}"
+                
+                text = font.render(label, True, BLACK)
+                surface.blit(text, (point[0] + 8, point[1] - 8))
+
 class Controller:
     def __init__(self):
         self.trajectory = []
@@ -312,14 +310,19 @@ class Controller:
         self.max_target_trajectory_points = 1500
         self.target_point = None
         self.control_mode = "manual"
-        self.follow_speed = 0.1
-        self.lookahead_distance = 10
-        self.a_star_path = []  # Store A* path
+        self.follow_speed = 0.05
+        self.lookahead_distance = 20
+        
+        # Планировщик объезда
+        self.planner = ObstacleAvoidancePlanner()
+        self.current_avoidance_path = []
     
-    def set_a_star_path(self, path):
-        """Set the A* path as target trajectory"""
-        self.a_star_path = path
-        self.target_trajectory = path.copy()
+    def plan_avoidance(self, car_x, car_y, car_angle, obstacles):
+        """Планирует путь объезда"""
+        self.current_avoidance_path = self.planner.find_optimal_avoidance(
+            (car_x, car_y), car_angle, obstacles
+        )
+        self.target_trajectory = self.current_avoidance_path.copy()
     
     def add_point(self, x, y):
         self.trajectory.append((x, y))
@@ -331,29 +334,32 @@ class Controller:
         if len(self.target_trajectory) > self.max_target_trajectory_points:
             self.target_trajectory.pop(0)
 
-    def draw(self, surface, pathfinder):
-        # Draw A* grid and path
-        pathfinder.draw_grid(surface)
-        if self.a_star_path:
-            pathfinder.draw_path(surface, self.a_star_path)
+    def draw(self, surface):
+        # Отрисовка пути объезда
+        if self.current_avoidance_path and len(self.current_avoidance_path) > 1:
+            pygame.draw.lines(surface, GREEN, False, self.current_avoidance_path, 3)
+            
+            # Точки пути
+            for point in self.current_avoidance_path[::10]:
+                pygame.draw.circle(surface, LIGHT_GREEN, (int(point[0]), int(point[1])), 4)
         
-        # Draw trajectory
+        # Траектория автомобиля
         if len(self.trajectory) > 1:
             for i in range(1, len(self.trajectory)):
                 alpha = int(255 * i / len(self.trajectory))
-                color = (0, 100, 200, alpha)
+                color = (0, 100, 200)
                 pygame.draw.line(surface, color, self.trajectory[i-1], self.trajectory[i], 2)
         
-        # Draw target trajectory
+        # Целевая траектория
         if len(self.target_trajectory) > 1:
             for i in range(1, len(self.target_trajectory)):
                 alpha = int(255 * i / len(self.target_trajectory))
-                color = (100, 0, 200, alpha)
+                color = (100, 0, 200)
                 pygame.draw.line(surface, color, self.target_trajectory[i-1], self.target_trajectory[i], 2)
        
         if self.target_point:
-            pygame.draw.circle(surface, PURPLE, (int(self.target_point[0]), int(self.target_point[1])), 6)
-            pygame.draw.circle(surface, WHITE, (int(self.target_point[0]), int(self.target_point[1])), 6, 2)
+            pygame.draw.circle(surface, PURPLE, (int(self.target_point[0]), int(self.target_point[1])), 8)
+            pygame.draw.circle(surface, WHITE, (int(self.target_point[0]), int(self.target_point[1])), 8, 2)
    
     def find_target_point(self, car_x, car_y, car_angle):
         if len(self.target_trajectory) < 10:
@@ -373,7 +379,7 @@ class Controller:
                 target_idx = i
        
         if target_idx != -1:
-            ahead_idx = min(target_idx + 5, len(self.target_trajectory) - 1)
+            ahead_idx = min(target_idx + 15, len(self.target_trajectory) - 1)
             return self.target_trajectory[ahead_idx]
        
         return None
@@ -405,11 +411,10 @@ class Controller:
        
         return steering_angle
 
-# Car class (your existing Car class remains the same)
 class Car:
     def __init__(self):
-        self.x = WIDTH // 2
-        self.y = HEIGHT // 2
+        self.x = 100
+        self.y = 400
         self.angle = 0
         self.speed = 0
         self.max_speed = 5
@@ -422,6 +427,9 @@ class Car:
         self.width = 30
         self.wheel_radius = 8
         self.wheel_width = 4
+        self.collision = False  # Добавлено отсутствующее свойство
+
+        self.max_turning_radius = self.length / math.tan(self.max_steering_angle)
        
     def get_corners(self):
         front_offset = self.length * 0.4
@@ -509,32 +517,25 @@ class Car:
         end_y = self.y + direction_length * sin_angle
         pygame.draw.line(surface, BLUE, (self.x, self.y), (end_x, end_y), 2)
 
-def generate_obstacles(count=10):
+def generate_obstacles(count=1):
     obstacles = []
     for _ in range(count):
-        obstacle_type = random.choice(["rectangle", "circle"])
-        x = random.randint(50, WIDTH - 50)
-        y = random.randint(50, HEIGHT - 50)
-        obstacles.append(Obstacle(x, y, obstacle_type))
+        x = random.randint(400, WIDTH - 200)
+        y = random.randint(200, HEIGHT - 200)
+        obstacles.append(Obstacle(x, y))
     return obstacles
-
-def fill_line_target_trajectory(controller:Controller):
-    step = WIDTH/controller.max_target_trajectory_points
-    for x in np.arange(0, WIDTH, step):
-        y = 400 + 5*np.sin(x*0.01)
-        controller.add_target_point(x, y)
 
 # Create game objects
 car = Car()
-obstacles = generate_obstacles(8)
+obstacles = generate_obstacles(1)
 controller = Controller()
-pathfinder = AStarPathfinder(grid_size=25)  # Create A* pathfinder
 
-fill_line_target_trajectory(controller)
+# Номинальная траектория
+nominal_y = 400
+for x in np.arange(0, WIDTH, STEP):
+    controller.add_target_point(x, nominal_y)
 
 # Main game loop
-planning_requested = False
-goal_pos = None
 clock = pygame.time.Clock()
 running = True
 
@@ -544,40 +545,23 @@ while running:
             running = False
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r:
-                obstacles = generate_obstacles(6)
+                obstacles = generate_obstacles(1)
                 car.collision = False
             elif event.key == pygame.K_c:
                 controller.trajectory = []
-                controller.a_star_path = []
                 controller.target_trajectory = []
+                # Восстанавливаем номинальную траекторию
+                for x in np.arange(0, WIDTH, STEP):
+                    controller.add_target_point(x, nominal_y)
             elif event.key == pygame.K_t:
                 controller.control_mode = "follow" if controller.control_mode == "manual" else "manual"
             elif event.key == pygame.K_p:
-                planning_requested = True
-            elif event.key == pygame.K_g:
-                goal_pos = pygame.mouse.get_pos()
-                planning_requested = True
-            elif event.key == pygame.K_d:
-                # Toggle grid display
-                pathfinder.grid_size = 0 if pathfinder.grid_size > 0 else 25
+                # Планирование объезда
+                controller.plan_avoidance(car.x, car.y, car.angle, obstacles)
+                controller.control_mode = "follow"
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:  # Left click
-                goal_pos = event.pos
-                planning_requested = True
-            elif event.button == 3:  # Right click - set start position
+            if event.button == 3:  # Right click - set start position
                 car.x, car.y = event.pos
-
-    # Path planning with A*
-    if planning_requested and goal_pos:
-        print(f"Planning path from ({car.x:.1f}, {car.y:.1f}) to ({goal_pos[0]}, {goal_pos[1]})")
-        path = pathfinder.find_path((car.x, car.y), goal_pos, obstacles)
-        if path:
-            controller.set_a_star_path(path)
-            print(f"Path found with {len(path)} points")
-            controller.control_mode = "follow"
-        else:
-            print("No path found!")
-        planning_requested = False
 
     # Control handling
     keys = pygame.key.get_pressed()
@@ -603,8 +587,9 @@ while running:
             elif car.steering_angle < 0:
                 car.steering_angle = min(0, car.steering_angle + car.steering_speed)
     else:
+        # Follow mode
         if abs(car.speed) < 1.0:
-            car.speed = 1.0
+            car.speed = 0.65
        
         controller.target_point = controller.find_target_point(car.x, car.y, car.angle)
         if controller.target_point:
@@ -616,6 +601,7 @@ while running:
     if abs(car.speed) > 0.5:
         controller.add_point(car.x, car.y)
     
+    # Проверка столкновений
     car_corners = car.get_corners()
     car.collision = False
     for obstacle in obstacles:
@@ -628,19 +614,17 @@ while running:
    
     # Draw grid
     for x in range(0, WIDTH, 50):
-        pygame.draw.line(screen, GRAY, (x, 0), (x, HEIGHT), 1)
+        pygame.draw.line(screen, (220, 220, 220), (x, 0), (x, HEIGHT), 1)
     for y in range(0, HEIGHT, 50):
-        pygame.draw.line(screen, GRAY, (0, y), (WIDTH, y), 1)
+        pygame.draw.line(screen, (220, 220, 220), (0, y), (WIDTH, y), 1)
     
-    controller.draw(screen, pathfinder)
+    # Номинальная траектория
+    pygame.draw.line(screen, GRAY, (0, nominal_y), (WIDTH, nominal_y), 2)
+    
+    controller.draw(screen)
     car.draw(screen)
-   
-    # Draw goal marker
-    if goal_pos:
-        pygame.draw.circle(screen, ORANGE, (int(goal_pos[0]), int(goal_pos[1])), 8)
-        pygame.draw.circle(screen, BLACK, (int(goal_pos[0]), int(goal_pos[1])), 8, 2)
 
-    # Draw game objects
+    # Draw obstacles
     for obstacle in obstacles:
         obstacle.draw(screen)
 
@@ -652,11 +636,11 @@ while running:
     collision_text = font.render(f"Collision: {car.collision}", True, RED if car.collision else BLACK)
     mode_text = font.render(f"Mode: {controller.control_mode.upper()}", True, PURPLE if controller.control_mode == "follow" else BLACK)
     trajectory_text = font.render(f"Trajectory points: {len(controller.trajectory)}", True, BLACK)
-    path_text = font.render(f"A* Path points: {len(controller.a_star_path)}", True, GREEN if controller.a_star_path else BLACK)
+    path_text = font.render(f"Avoidance path: {len(controller.current_avoidance_path)} points", True, GREEN if controller.current_avoidance_path else BLACK)
     position_text = font.render(f"Car Position: {car.x:.1f}, {car.y:.1f}", True, BLACK)
     
-    help_text1 = font.render("R: New obstacles, C: Clear, T: Toggle mode, G: Set goal", True, BLACK)
-    help_text2 = font.render("Left click: Set goal, Right click: Set start, D: Toggle grid", True, BLACK)
+    help_text1 = font.render("R: New obstacles, C: Clear nominal path, T: Toggle mode", True, BLACK)
+    help_text2 = font.render("P: Plan avoidance with tangent arcs, Right click: Set start", True, BLACK)
 
     screen.blit(speed_text, (10, 10))
     screen.blit(angle_text, (10, 40))
