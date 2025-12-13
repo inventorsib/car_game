@@ -5,8 +5,14 @@ import random
 import numpy as np
 from typing import List, Tuple, Optional
 import dubins_path_planner
+from enum import Enum
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+import networkx as nx
+
+from dataclasses import dataclass
 
 # Initialize Pygame
 pygame.init()
@@ -137,12 +143,17 @@ class ArcGenerator:
         return solutions
 
 class Obstacle:
+    _next_id = 1
+
     def __init__(self, x, y, radius=None):
         self.x = x
         self.y = y
         self.radius = radius if radius else random.randint(25, 45)
         self.safety_radius = self.radius + 40  # Радиус безопасности
         self.color = (random.randint(100, 200), random.randint(100, 200), random.randint(100, 200))
+        
+        self.id = Obstacle._next_id
+        Obstacle._next_id += 1
        
     def draw(self, surface):
         # Основное препятствие
@@ -163,121 +174,1126 @@ class Obstacle:
                 return True
         return False
 
+# Определим типы узлов
+class NodeType(Enum):
+    LINE = 1
+    CIRCLE = 2
+    START = 3
+    GOAL = 4
+
+@dataclass
+class Node:
+    x: float
+    y: float
+    th: float  # ориентация (theta)
+    node_type: NodeType
+    circle_id: int = 0
+    g_cost: float = 0  # стоимость от старта
+    h_cost: float = 0  # эвристическая стоимость до цели
+    parent: Optional['Node'] = None
+    
+    @property
+    def f_cost(self):
+        return self.g_cost + self.h_cost
+    
+    def __hash__(self):
+        return hash((self.x, self.y, self.th, self.node_type.value, self.circle_id))
+
+class NodeVisualizer:
+    def __init__(self, figsize=(10, 8)):
+        self.fig, self.ax = plt.subplots(figsize=figsize)
+        self.setup_plot()
+    
+    def setup_plot(self):
+        """Настройка графика"""
+        self.ax.set_aspect('equal')
+        self.ax.grid(True, alpha=0.3)
+        self.ax.set_xlabel('X координата')
+        self.ax.set_ylabel('Y координата')
+        self.ax.set_title('Визуализация узлов пути')
+    
+    def draw_node(self, node: Node, color='blue', size=100, show_orientation=True):
+        """Отрисовка одного узла"""
+        # Определяем цвет и маркер в зависимости от типа узла
+        if node.node_type == NodeType.START:
+            marker = 's'  # квадрат
+            color = 'green'
+            size = 150
+        elif node.node_type == NodeType.GOAL:
+            marker = 'D'  # ромб
+            color = 'red'
+            size = 150
+        elif node.node_type == NodeType.CIRCLE:
+            marker = 'o'  # круг
+            color = 'orange'
+        else:  # LINE
+            marker = '^'  # треугольник
+            color = 'blue'
+        
+        # Рисуем узел
+        self.ax.scatter(node.x, node.y, s=size, c=color, marker=marker, 
+                       edgecolors='black', linewidth=1, zorder=3)
+        
+        # Добавляем подпись с информацией об узле
+        label = f"({node.x:.1f}, {node.y:.1f})\nθ={node.th:.1f}"
+        if node.node_type == NodeType.CIRCLE:
+            label += f"\nID={node.circle_id}"
+        
+        self.ax.text(node.x, node.y + 0.1, label, fontsize=8, 
+                    ha='center', va='bottom', zorder=4)
+        
+        # Рисуем ориентацию (стрелку направления)
+        if show_orientation:
+            arrow_length = 0.3
+            dx = arrow_length * np.cos(node.th)
+            dy = arrow_length * np.sin(node.th)
+            self.ax.arrow(node.x, node.y, dx, dy, 
+                         head_width=0.05, head_length=0.1, 
+                         fc=color, ec='black', zorder=2)
+    
+    def draw_path(self, nodes, color='purple', linewidth=2, alpha=0.7):
+        """Отрисовка пути между узлами"""
+        if len(nodes) < 2:
+            return
+        
+        xs = [node.x for node in nodes]
+        ys = [node.y for node in nodes]
+        
+        self.ax.plot(xs, ys, color=color, linewidth=linewidth, 
+                    alpha=alpha, zorder=1, linestyle='--')
+        
+        # Добавляем стрелки для направления пути
+        for i in range(len(nodes) - 1):
+            node1 = nodes[i]
+            node2 = nodes[i + 1]
+            mid_x = (node1.x + node2.x) / 2
+            mid_y = (node1.y + node2.y) / 2
+            
+            # Вычисляем направление
+            dx = node2.x - node1.x
+            dy = node2.y - node1.y
+            length = np.sqrt(dx**2 + dy**2)
+            
+            if length > 0:
+                dx, dy = dx/length, dy/length
+                self.ax.arrow(mid_x, mid_y, dx*0.1, dy*0.1,
+                            head_width=0.05, head_length=0.1,
+                            fc=color, ec=color, zorder=1)
+    
+    def draw_circle_info(self, node: Node, radius=0.5):
+        """Отрисовка дополнительной информации для круговых узлов"""
+        if node.node_type == NodeType.CIRCLE:
+            # Рисуем дугу окружности
+            circle = patches.Arc((node.x, node.y), 
+                                width=radius*2, 
+                                height=radius*2,
+                                angle=0, theta1=0, theta2=np.degrees(node.th),
+                                color='orange', linewidth=2, alpha=0.5)
+            self.ax.add_patch(circle)
+    
+    def draw_all_nodes(self, nodes, show_path=True, show_parent_connections=False):
+        """Отрисовка всех узлов"""
+        # Сортируем узлы по типу для правильного порядка отрисовки
+        start_nodes = [n for n in nodes if n.node_type == NodeType.START]
+        goal_nodes = [n for n in nodes if n.node_type == NodeType.GOAL]
+        line_nodes = [n for n in nodes if n.node_type == NodeType.LINE]
+        circle_nodes = [n for n in nodes if n.node_type == NodeType.CIRCLE]
+        
+        # Отрисовываем в определенном порядке
+        for node in line_nodes:
+            self.draw_node(node)
+        
+        for node in circle_nodes:
+            self.draw_node(node)
+            self.draw_circle_info(node)
+        
+        for node in start_nodes:
+            self.draw_node(node)
+        
+        for node in goal_nodes:
+            self.draw_node(node)
+        
+        # Отрисовываем связи с родительскими узлами
+        if show_parent_connections:
+            for node in nodes:
+                if node.parent:
+                    self.ax.plot([node.x, node.parent.x], 
+                                [node.y, node.parent.y], 
+                                'gray', linestyle=':', alpha=0.5, zorder=1)
+        
+        # Отрисовываем путь, если узлы упорядочены
+        if show_path and len(nodes) > 1:
+            # Пытаемся восстановить путь через parent ссылки
+            path_nodes = []
+            current = nodes[-1] if nodes[-1].node_type == NodeType.GOAL else None
+            
+            while current:
+                path_nodes.append(current)
+                current = current.parent
+            
+            if path_nodes:
+                path_nodes.reverse()
+                self.draw_path(path_nodes)
+    
+    def show_legend(self):
+        """Добавление легенды"""
+        from matplotlib.lines import Line2D
+        
+        legend_elements = [
+            Line2D([0], [0], marker='s', color='w', markerfacecolor='green',
+                  markersize=10, label='Старт'),
+            Line2D([0], [0], marker='D', color='w', markerfacecolor='red',
+                  markersize=10, label='Цель'),
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='blue',
+                  markersize=10, label='Линейный узел'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange',
+                  markersize=10, label='Круговой узел'),
+            Line2D([0], [0], color='purple', linestyle='--', linewidth=2,
+                  label='Путь'),
+            Line2D([0], [0], color='gray', linestyle=':', linewidth=1,
+                  label='Родительские связи'),
+        ]
+        
+        self.ax.legend(handles=legend_elements, loc='upper right')
+    
+    def show(self):
+        """Показать график"""
+        self.show_legend()
+        plt.tight_layout()
+        plt.show()
+
+class GraphVisualizer:
+    def __init__(self, figsize=(12, 10), max_connection_dist=200, 
+                 max_curvature=0.02, step_size=1.0):
+        """
+        Инициализация визуализатора графа с путями Дубинса
+        
+        Args:
+            figsize: Размер графика
+            max_connection_dist: Максимальное расстояние для соединения узлов
+            max_curvature: Максимальная кривизна (1/минимальный радиус поворота)
+            step_size: Шаг дискретизации для построения пути
+        """
+        self.fig, self.ax = plt.subplots(figsize=figsize)
+        self.graph = nx.Graph()
+        self.max_connection_dist = max_connection_dist
+        self.max_curvature = max_curvature
+        self.step_size = step_size
+        self.dubins_cache = {}  # Кэш для путей Дубинса
+        self.setup_plot()
+    
+    def setup_plot(self):
+        """Настройка графика"""
+        self.ax.set_aspect('equal')
+        self.ax.grid(True, alpha=0.3)
+        self.ax.set_xlabel('X координата', fontsize=12)
+        self.ax.set_ylabel('Y координата', fontsize=12)
+        self.ax.set_title('Граф с путями Дубинса', fontsize=14)
+    
+    def is_connection_possible(self, node1: Node, node2: Node, 
+                               obstacles: List[Obstacle]) -> bool:
+        """
+        Проверяет, возможен ли переход между узлами с помощью пути Дубинса
+        
+        Args:
+            node1: Начальный узел
+            node2: Конечный узел
+            obstacles: Список препятствий
+            
+        Returns:
+            bool: True если соединение возможно
+        """
+        # Узел должен быть правее (больше по X)
+        if node2.x <= node1.x:
+            return False
+        
+        # Максимальное расстояние для соединения
+        dx = node2.x - node1.x
+        dy = node2.y - node1.y
+        euclidean_dist = math.sqrt(dx*dx + dy*dy)
+        
+        if euclidean_dist > self.max_connection_dist:
+            return False
+        
+        # Генерируем путь Дубинса для проверки столкновений
+        path_points, path_length = self._generate_and_cache_dubins_path(node1, node2)
+        
+        if path_points is None or len(path_points) == 0:
+            return False
+        
+        # Проверка столкновений с препятствиями
+        for obstacle in obstacles:
+            if self._dubins_path_collision(path_points, obstacle):
+                return False
+        
+        return True
+    
+    def _generate_and_cache_dubins_path(self, node1: Node, node2: Node, num_points=100):
+        """
+        Генерирует путь Дубинса и кэширует результат
+        
+        Args:
+            node1, node2: начальный и конечный узлы
+            num_points: количество точек для дискретизации
+            
+        Returns:
+            tuple: (точки пути, длина пути)
+        """
+        # Создаем ключ для кэша
+        cache_key = (node1.x, node1.y, node1.th, 
+                    node2.x, node2.y, node2.th,
+                    self.max_curvature)
+        
+        # Проверяем кэш
+        if cache_key in self.dubins_cache:
+            return self.dubins_cache[cache_key]
+        
+        # Генерируем путь Дубинса с использованием вашего модуля
+        try:
+            # Используем функцию plan_dubins_path из вашего модуля
+            x_list, y_list, yaw_list, modes, lengths = dubins.plan_dubins_path(
+                s_x=node1.x,
+                s_y=node1.y,
+                s_yaw=node1.th,
+                g_x=node2.x,
+                g_y=node2.y,
+                g_yaw=node2.th,
+                curvature=self.max_curvature,
+                step_size=self.step_size
+            )
+            
+            # Преобразуем в массив точек
+            path_points = np.column_stack([x_list, y_list])
+            
+            # Вычисляем общую длину пути
+            total_length = sum(lengths)
+            
+            # Сохраняем в кэш
+            self.dubins_cache[cache_key] = (path_points, total_length)
+            
+            return path_points, total_length
+            
+        except Exception as e:
+            print(f"Ошибка при генерации пути Дубинса: {e}")
+            # Возвращаем упрощенный путь в случае ошибки
+            points = self._generate_simple_path(node1, node2, num_points)
+            distance = math.sqrt((node2.x - node1.x)**2 + (node2.y - node1.y)**2)
+            return points, distance
+    
+    def _generate_simple_path(self, node1: Node, node2: Node, num_points=50):
+        """
+        Генерирует упрощенный путь (используется как fallback)
+        """
+        points = []
+        for i in range(num_points):
+            t = i / (num_points - 1)
+            x = node1.x + t * (node2.x - node1.x)
+            y = node1.y + t * (node2.y - node1.y)
+            points.append([x, y])
+        
+        return np.array(points)
+    
+    def _dubins_path_collision(self, path_points: np.ndarray, obstacle: Obstacle) -> bool:
+        """
+        Проверяет столкновение пути Дубинса с препятствием
+        
+        Args:
+            path_points: точки пути [N, 2]
+            obstacle: препятствие
+            
+        Returns:
+            bool: True если есть столкновение
+        """
+        # Проверяем каждую точку пути
+        for point in path_points:
+            distance = math.sqrt((point[0] - obstacle.x)**2 + (point[1] - obstacle.y)**2)
+            if distance <= obstacle.safety_radius:
+                return True
+        
+        # Также проверяем промежуточные сегменты пути
+        for i in range(len(path_points) - 1):
+            p1 = path_points[i]
+            p2 = path_points[i + 1]
+            
+            if self._line_circle_collision(p1, p2, obstacle):
+                return True
+        
+        return False
+    
+    def _line_circle_collision(self, p1, p2, obstacle: Obstacle) -> bool:
+        """
+        Проверка пересечения линии с окружностью
+        """
+        # Вектор линии
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        line_len = math.sqrt(dx*dx + dy*dy)
+        
+        if line_len == 0:
+            return True
+        
+        # Вектор от начала линии к центру окружности
+        fx = obstacle.x - p1[0]
+        fy = obstacle.y - p1[1]
+        
+        # Проекция на линию
+        projection = (fx*dx + fy*dy) / line_len
+        
+        # Ближайшая точка на линии к центру окружности
+        if projection <= 0:
+            closest_x, closest_y = p1[0], p1[1]
+        elif projection >= line_len:
+            closest_x, closest_y = p2[0], p2[1]
+        else:
+            closest_x = p1[0] + (dx * projection / line_len)
+            closest_y = p1[1] + (dy * projection / line_len)
+        
+        # Расстояние от ближайшей точки до центра окружности
+        dist = math.sqrt((obstacle.x - closest_x)**2 + (obstacle.y - closest_y)**2)
+        
+        return dist <= obstacle.safety_radius
+    
+    def calculate_dubins_distance(self, node1: Node, node2: Node) -> float:
+        """
+        Вычисление длины пути Дубинса между двумя узлами
+        
+        Args:
+            node1, node2: начальный и конечный узлы
+            
+        Returns:
+            float: длина пути Дубинса
+        """
+        # Генерируем путь и получаем его длину
+        _, path_length = self._generate_and_cache_dubins_path(node1, node2)
+        return path_length
+    
+    def build_graph(self, nodes: List[Node], obstacles: List[Obstacle]) -> nx.Graph:
+        """
+        Построение графа с использованием путей Дубинса
+        
+        Args:
+            nodes: Список всех узлов
+            obstacles: Список препятствий
+            
+        Returns:
+            nx.Graph: Построенный граф
+        """
+        self.graph.clear()
+        self.dubins_cache.clear()  # Очищаем кэш
+        
+        # Добавляем узлы в граф с атрибутами
+        for i, node in enumerate(nodes):
+            self.graph.add_node(i, 
+                               x=node.x, 
+                               y=node.y, 
+                               th=node.th,
+                               node_type=node.node_type,
+                               circle_id=node.circle_id,
+                               g_cost=node.g_cost,
+                               h_cost=node.h_cost)
+        
+        # Проверяем все возможные соединения
+        print("Построение графа с путями Дубинса...")
+        total_checks = 0
+        connections_made = 0
+        
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                total_checks += 1
+                
+                if self.is_connection_possible(nodes[i], nodes[j], obstacles):
+                    # Вычисляем длину пути Дубинса
+                    dubins_distance = self.calculate_dubins_distance(nodes[i], nodes[j])
+                    
+                    # Евклидово расстояние для сравнения
+                    euclidean_distance = math.sqrt(
+                        (nodes[j].x - nodes[i].x)**2 + 
+                        (nodes[j].y - nodes[i].y)**2)
+                    
+                    # Учитываем тип узлов в стоимости
+                    cost_multiplier = 1.0
+                    if (nodes[i].node_type == NodeType.CIRCLE or 
+                        nodes[j].node_type == NodeType.CIRCLE):
+                        cost_multiplier = 1.2  # Дополнительная стоимость для круговых узлов
+                    
+                    # Сохраняем информацию о ребре
+                    self.graph.add_edge(i, j, 
+                                       weight=dubins_distance * cost_multiplier,
+                                       dubins_distance=dubins_distance,
+                                       euclidean_distance=euclidean_distance,
+                                       start_node=i,
+                                       end_node=j)
+                    connections_made += 1
+        
+        print(f"Проверено соединений: {total_checks}")
+        print(f"Установлено соединений: {connections_made}")
+        print(f"Плотность графа: {connections_made/total_checks*100:.1f}%")
+        
+        # Статистика по длинам путей
+        if connections_made > 0:
+            dubins_lengths = [d['dubins_distance'] for _, _, d in self.graph.edges(data=True)]
+            euclid_lengths = [d['euclidean_distance'] for _, _, d in self.graph.edges(data=True)]
+            
+            avg_ratio = sum(dubins_lengths) / sum(euclid_lengths) if sum(euclid_lengths) > 0 else 1.0
+            print(f"Среднее отношение Дубинс/Евклид: {avg_ratio:.3f}")
+        
+        return self.graph
+    
+    def draw_obstacles(self, obstacles: List[Obstacle]):
+        """Отрисовка препятствий"""
+        for obstacle in obstacles:
+            # Основной радиус
+            circle_color = [c/255 for c in obstacle.color]
+            circle = patches.Circle((obstacle.x, obstacle.y), obstacle.radius,
+                                  color=circle_color, 
+                                  alpha=0.6, 
+                                  label=f'Препятствие {obstacle.id}' if obstacle.id == 1 else "")
+            self.ax.add_patch(circle)
+            
+            # Радиус безопасности
+            safety_circle = patches.Circle((obstacle.x, obstacle.y), obstacle.safety_radius,
+                                         color=circle_color, 
+                                         alpha=0.2, 
+                                         linestyle='--', 
+                                         fill=False,
+                                         label='Радиус безопасности' if obstacle.id == 1 else "")
+            self.ax.add_patch(safety_circle)
+            
+            # Подпись с ID
+            self.ax.text(obstacle.x, obstacle.y, f"ID:{obstacle.id}", 
+                        ha='center', va='center', 
+                        fontsize=8, fontweight='bold',
+                        bbox=dict(boxstyle="round,pad=0.3", 
+                                 facecolor="white", alpha=0.8))
+    
+    def draw_nodes(self, nodes: List[Node], highlight_path: List[int] = None):
+        """Отрисовка узлов графа"""
+        if highlight_path is None:
+            highlight_path = []
+        
+        # Создаем словарь позиций
+        pos = {}
+        for i, node in enumerate(nodes):
+            pos[i] = (node.x, node.y)
+        
+        # Подготавливаем данные для отрисовки
+        node_colors = []
+        node_sizes = []
+        
+        for i, node in enumerate(nodes):
+            if i in highlight_path:
+                node_colors.append('gold')
+                node_sizes.append(350)
+            elif node.node_type == NodeType.START:
+                node_colors.append('green')
+                node_sizes.append(300)
+            elif node.node_type == NodeType.GOAL:
+                node_colors.append('red')
+                node_sizes.append(300)
+            elif node.node_type == NodeType.CIRCLE:
+                node_colors.append('orange')
+                node_sizes.append(250)
+            else:  # LINE
+                node_colors.append('blue')
+                node_sizes.append(200)
+        
+        # Рисуем узлы
+        nx.draw_networkx_nodes(self.graph, pos, 
+                             node_color=node_colors,
+                             node_size=node_sizes,
+                             edgecolors='black',
+                             linewidths=1.5,
+                             ax=self.ax)
+        
+        # Добавляем подписи к узлам
+        for i, (x, y) in pos.items():
+            node = nodes[i]
+            label = f"N{i}"
+            
+            if node.node_type == NodeType.CIRCLE:
+                label += f"\nC{node.circle_id}"
+            
+            self.ax.text(x, y + 0.2, label, 
+                        ha='center', va='bottom', 
+                        fontsize=9, fontweight='bold',
+                        bbox=dict(boxstyle="round,pad=0.3", 
+                                 facecolor="white", alpha=0.8))
+            
+            # Рисуем ориентацию (стрелку)
+            arrow_length = 0.4
+            dx = arrow_length * math.cos(node.th)
+            dy = arrow_length * math.sin(node.th)
+            
+            self.ax.arrow(x, y, dx, dy, 
+                         head_width=0.08, head_length=0.15, 
+                         fc=node_colors[i], ec='black', 
+                         alpha=0.8, linewidth=1.5)
+    
+    def draw_dubins_edges(self, nodes: List[Node], highlight_path: List[int] = None):
+        """Отрисовка рёбер графа как путей Дубинса"""
+        if highlight_path is None:
+            highlight_path = []
+        
+        # Отрисовываем все пути Дубинса
+        for u, v, data in self.graph.edges(data=True):
+            node1 = nodes[u]
+            node2 = nodes[v]
+            
+            # Определяем стиль отрисовки
+            if u in highlight_path and v in highlight_path:
+                # Ребро пути - выделяем
+                color = 'red'
+                linewidth = 3
+                alpha = 0.9
+                zorder = 3
+                label = 'Оптимальный путь' if u == highlight_path[0] else None
+            else:
+                # Обычное ребро
+                color = 'gray'
+                linewidth = 1
+                alpha = 0.3
+                zorder = 1
+                label = None
+            
+            # Получаем кэшированный путь Дубинса
+            cache_key = (node1.x, node1.y, node1.th, 
+                        node2.x, node2.y, node2.th,
+                        self.max_curvature)
+            
+            if cache_key in self.dubins_cache:
+                path_points, _ = self.dubins_cache[cache_key]
+                
+                # Рисуем путь
+                self.ax.plot(path_points[:, 0], path_points[:, 1], 
+                            color=color, linewidth=linewidth, 
+                            alpha=alpha, zorder=zorder, label=label)
+                
+                # Добавляем стрелку направления в середине пути
+                if len(path_points) > 2:
+                    mid_idx = len(path_points) // 2
+                    if mid_idx + 1 < len(path_points):
+                        dx = path_points[mid_idx + 1, 0] - path_points[mid_idx, 0]
+                        dy = path_points[mid_idx + 1, 1] - path_points[mid_idx, 1]
+                        length = math.sqrt(dx*dx + dy*dy)
+                        if length > 0:
+                            self.ax.arrow(path_points[mid_idx, 0], 
+                                         path_points[mid_idx, 1],
+                                         dx*0.3, dy*0.3,
+                                         head_width=0.05, head_length=0.1,
+                                         fc=color, ec=color, alpha=alpha*0.8, 
+                                         zorder=zorder)
+    
+    def find_shortest_path(self, start_idx: int, goal_idx: int) -> List[int]:
+        """
+        Найти кратчайший путь в графе
+        
+        Args:
+            start_idx: Индекс начального узла
+            goal_idx: Индекс конечного узла
+            
+        Returns:
+            List[int]: Список индексов узлов пути или пустой список
+        """
+        try:
+            if not self.graph.has_node(start_idx) or not self.graph.has_node(goal_idx):
+                print(f"Ошибка: узел {start_idx} или {goal_idx} не существует в графе")
+                return []
+            
+            # Используем алгоритм Дейкстры с весами пути Дубинса
+            path = nx.dijkstra_path(self.graph, start_idx, goal_idx, weight='weight')
+            path_length = nx.dijkstra_path_length(self.graph, start_idx, goal_idx, weight='weight')
+            
+            # Вычисляем сумму евклидовых расстояний для сравнения
+            euclid_length = 0
+            for i in range(len(path) - 1):
+                euclid_length += self.graph.edges[path[i], path[i+1]]['euclidean_distance']
+            
+            print(f"✓ Найден путь из {len(path)} узлов")
+            print(f"✓ Длина пути (Дубинс): {path_length:.2f}")
+            print(f"✓ Длина пути (Евклид): {euclid_length:.2f}")
+            print(f"✓ Отношение: {path_length/euclid_length:.3f}")
+            print(f"✓ Путь: {' → '.join(map(str, path))}")
+            
+            return path
+            
+        except nx.NetworkXNoPath:
+            print("✗ Путь не найден!")
+            return []
+        except Exception as e:
+            print(f"✗ Ошибка при поиске пути: {e}")
+            return []
+    
+    def draw_graph_statistics(self, nodes: List[Node]):
+        """Отображение статистики графа"""
+        if self.graph.number_of_nodes() == 0:
+            return
+        
+        stats_text = [
+            f"СТАТИСТИКА ГРАФА:",
+            f"Узлы: {self.graph.number_of_nodes()}",
+            f"Соединения: {self.graph.number_of_edges()}",
+            f"Плотность: {nx.density(self.graph):.3f}",
+        ]
+        
+        # Статистика по типам узлов
+        type_counts = {}
+        for i in self.graph.nodes():
+            node_type = self.graph.nodes[i]['node_type']
+            type_counts[node_type] = type_counts.get(node_type, 0) + 1
+        
+        stats_text.append(f"Типы узлов:")
+        for node_type, count in type_counts.items():
+            stats_text.append(f"  {node_type.name}: {count}")
+        
+        # Статистика по длинам путей
+        if self.graph.number_of_edges() > 0:
+            dubins_lengths = [d['dubins_distance'] for _, _, d in self.graph.edges(data=True)]
+            euclid_lengths = [d['euclidean_distance'] for _, _, d in self.graph.edges(data=True)]
+            
+            avg_dubins = sum(dubins_lengths) / len(dubins_lengths)
+            avg_euclid = sum(euclid_lengths) / len(euclid_lengths)
+            avg_ratio = avg_dubins / avg_euclid if avg_euclid > 0 else 1.0
+            
+            stats_text.extend([
+                f"Средняя длина:",
+                f"  Дубинс: {avg_dubins:.1f}",
+                f"  Евклид: {avg_euclid:.1f}",
+                f"  Отношение: {avg_ratio:.3f}",
+            ])
+        
+        # Параметры планирования
+        stats_text.extend([
+            f"Параметры:",
+            f"  Макс. соединение: {self.max_connection_dist}",
+            f"  Кривизна: {self.max_curvature:.4f}",
+            f"  Мин. радиус: {1.0/self.max_curvature if self.max_curvature > 0 else '∞':.1f}",
+            f"  Шаг: {self.step_size}",
+        ])
+        
+        # Создаем текстовое поле со статистикой
+        stats_str = "\n".join(stats_text)
+        self.ax.text(0.02, 0.98, stats_str,
+                    transform=self.ax.transAxes,
+                    verticalalignment='top',
+                    fontsize=9,
+                    bbox=dict(boxstyle="round,pad=0.5",
+                             facecolor="lightyellow",
+                             edgecolor="orange",
+                             alpha=0.9))
+    
+    def show_legend(self):
+        """Добавление легенды"""
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+        
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='green',
+                  markersize=12, label='Старт', markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+                  markersize=12, label='Цель', markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='orange',
+                  markersize=10, label='Круговой узел', markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='blue',
+                  markersize=10, label='Линейный узел', markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gold',
+                  markersize=12, label='Узел пути', markeredgewidth=1.5),
+            Line2D([0], [0], color='red', linewidth=3, label='Оптимальный путь'),
+            Line2D([0], [0], color='gray', linewidth=1, label='Возможные пути'),
+            Patch(facecolor='lightgray', alpha=0.6, label='Препятствие'),
+            Patch(facecolor='lightgray', alpha=0.2, edgecolor='gray', 
+                  linestyle='--', label='Радиус безопасности'),
+        ]
+        
+        self.ax.legend(handles=legend_elements, 
+                      loc='upper left', 
+                      bbox_to_anchor=(1.02, 1),
+                      borderaxespad=0.,
+                      fontsize=10,
+                      title="Легенда",
+                      title_fontsize=11)
+    
+    def visualize(self, nodes: List[Node], obstacles: List[Obstacle],
+                 auto_find_path: bool = True) -> List[int]:
+        """
+        Полная визуализация графа с путями Дубинса
+        
+        Args:
+            nodes: Список узлов
+            obstacles: Список препятствий
+            auto_find_path: Автоматически искать путь
+            
+        Returns:
+            List[int]: Найденный путь или пустой список
+        """
+        # Строим граф
+        self.build_graph(nodes, obstacles)
+        
+        # Очищаем график
+        self.ax.clear()
+        self.setup_plot()
+        
+        # Находим индексы старта и цели
+        start_idx = next((i for i, n in enumerate(nodes) 
+                         if n.node_type == NodeType.START), 0)
+        goal_idx = next((i for i, n in enumerate(nodes) 
+                        if n.node_type == NodeType.GOAL), len(nodes)-1)
+        
+        # Ищем путь
+        path = []
+        if auto_find_path and start_idx is not None and goal_idx is not None:
+            path = self.find_shortest_path(start_idx, goal_idx)
+        
+        # Отрисовываем препятствия
+        self.draw_obstacles(obstacles)
+        
+        # Отрисовываем пути Дубинса
+        self.draw_dubins_edges(nodes, path)
+        
+        # Отрисовываем узлы
+        self.draw_nodes(nodes, path)
+        
+        # Добавляем статистику
+        self.draw_graph_statistics(nodes)
+        
+        # Добавляем легенду
+        self.show_legend()
+        
+        # Настраиваем layout
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+        
+        # Автомасштабирование
+        self._auto_scale(nodes, obstacles)
+        
+        # Выводим информацию о пути
+        if path:
+            self._print_path_details(path, nodes)
+        
+        return path
+    
+    def _auto_scale(self, nodes: List[Node], obstacles: List[Obstacle]):
+        """Автомасштабирование графика"""
+        all_x = [node.x for node in nodes]
+        all_y = [node.y for node in nodes]
+        
+        if obstacles:
+            all_x.extend([obstacle.x for obstacle in obstacles])
+            all_y.extend([obstacle.y for obstacle in obstacles])
+        
+        if all_x and all_y:
+            x_min, x_max = min(all_x), max(all_x)
+            y_min, y_max = min(all_y), max(all_y)
+            
+            x_margin = max((x_max - x_min) * 0.15, 50)
+            y_margin = max((y_max - y_min) * 0.15, 50)
+            
+            self.ax.set_xlim(x_min - x_margin, x_max + x_margin)
+            self.ax.set_ylim(y_min - y_margin, y_max + y_margin)
+    
+    def _print_path_details(self, path: List[int], nodes: List[Node]):
+        """Вывод детальной информации о пути"""
+        print("\n" + "="*60)
+        print("ДЕТАЛЬНАЯ ИНФОРМАЦИЯ О ПУТИ ДУБИНСА:")
+        print("="*60)
+        
+        total_dubins_length = 0
+        total_euclid_length = 0
+        
+        for i, node_idx in enumerate(path):
+            node = nodes[node_idx]
+            
+            print(f"{i+1:2d}. Узел {node_idx:2d}: "
+                  f"({node.x:6.1f}, {node.y:6.1f}) | "
+                  f"θ={node.th:5.2f} | "
+                  f"Тип: {node.node_type.name:8s}")
+            
+            if i < len(path) - 1:
+                next_idx = path[i+1]
+                edge_data = self.graph.edges[node_idx, next_idx]
+                
+                dubins_dist = edge_data['dubins_distance']
+                euclid_dist = edge_data['euclidean_distance']
+                
+                total_dubins_length += dubins_dist
+                total_euclid_length += euclid_dist
+                
+                print(f"     → Дубинс: {dubins_dist:6.1f} | "
+                      f"Евклид: {euclid_dist:6.1f} | "
+                      f"Коэф: {dubins_dist/euclid_dist:.3f}")
+        
+        print(f"\n📊 ИТОГО: {len(path)} сегментов")
+        print(f"📊 Общая длина Дубинса: {total_dubins_length:.1f}")
+        print(f"📊 Общая длина Евклида: {total_euclid_length:.1f}")
+        print(f"📊 Средний коэффициент: {total_dubins_length/total_euclid_length:.3f}")
+        print("="*60)
+
 class ObstacleAvoidancePlanner:
     """Упрощенный планировщик объезда препятствий"""
-    def __init__(self, nominal_trajectory_y=400):
+    def __init__(self, car, nominal_trajectory_y=400, step=20):
         self.nominal_trajectory_y = nominal_trajectory_y
         self.safety_margin = 60  # Отступ от препятствий
+        self.curvature = 1/car.max_turning_radius
+        self.graph = nx.Graph()
+        self.car = car
+        self.step = step
+
+    def crate_nodes(self, obstacles):
+        nodes = []
         
+        # Создаем узлы вдоль номинальной траектории
+        for x in np.arange(0, WIDTH, self.step):
+            y = self.nominal_trajectory_y
+            node_type = NodeType.LINE
+            th = 0.0  # Направление вдоль оси X
+            circle_id = -1  # -1 означает "не на окружности"
+            
+            # Проверяем столкновение с препятствиями
+            for obstacle in obstacles:
+                # Расстояние от точки до центра препятствия
+                dx = x - obstacle.x
+                dy = y - obstacle.y
+                distance_sq = dx**2 + dy**2
+                
+                if distance_sq < obstacle.safety_radius**2:
+
+                    for sign in (-1, 1):
+                        y = obstacle.y + sign * np.sqrt(obstacle.safety_radius**2 - (x - obstacle.x)**2)
+                        dy_dx = - (x - obstacle.x) / (y - obstacle.y)  # поскольку знак уже учтён в y
+                        th = np.arctan2(dy_dx, 1)
+                        node_type = NodeType.CIRCLE
+                        circle_id = obstacle.id
+
+                        node = Node(x, y, th, node_type, circle_id)
+                        nodes.append(node)
+
+
+            node = Node(x, y, th, node_type, circle_id)
+            nodes.append(node)
+            
+        # Добавляем конечный узел
+        end_node = Node(WIDTH - 50, self.nominal_trajectory_y, 0, NodeType.LINE, -1)
+        nodes.append(end_node)
+        
+        self.debug_nodes = nodes.copy()
+        return nodes
+    
+    def _line_circle_collision(self, p1n, p2n, obstacle: Obstacle) -> bool:
+        """
+        Проверка пересечения линии с окружностью
+        """
+        p1 = (p1n.x, p1n.y)
+        p2 = (p2n.x, p2n.y)
+
+        # Вектор линии
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        line_len = math.sqrt(dx*dx + dy*dy)
+        
+        if line_len == 0:
+            return True
+        
+        # Вектор от начала линии к центру окружности
+        fx = obstacle.x - p1[0]
+        fy = obstacle.y - p1[1]
+        
+        # Проекция на линию
+        projection = (fx*dx + fy*dy) / line_len
+        
+        # Ближайшая точка на линии к центру окружности
+        if projection <= 0:
+            closest_x, closest_y = p1[0], p1[1]
+        elif projection >= line_len:
+            closest_x, closest_y = p2[0], p2[1]
+        else:
+            closest_x = p1[0] + (dx * projection / line_len)
+            closest_y = p1[1] + (dy * projection / line_len)
+        
+        # Расстояние от ближайшей точки до центра окружности
+        dist = math.sqrt((obstacle.x - closest_x)**2 + (obstacle.y - closest_y)**2)
+        
+        return dist <= obstacle.safety_radius*0.8
+
+    def is_connection_possible(self, node1: Node, node2: Node, 
+                              obstacles: List[Obstacle]) -> bool:
+        """Проверяет, возможен ли переход между узлами"""
+        
+        # Узел должен быть правее (больше по X)
+        if node2.x <= node1.x:
+            return False
+        
+        # Максимальное расстояние для соединения
+        max_connection_dist = 1500
+        dist = math.sqrt((node2.x - node1.x)**2 + (node2.y - node1.y)**2)
+        if dist > max_connection_dist:
+            return False
+        
+        # Проверка столкновений с препятствиями
+        for obstacle in obstacles:
+            if self._line_circle_collision(node1, node2, obstacle):
+                return False
+            
+        if (node1.node_type == node2.node_type == NodeType.CIRCLE) and (node1.circle_id==node2.circle_id):
+            dist = math.sqrt((node2.x - node1.x)**2 + (node2.y - node1.y)**2)
+            if dist > self.step*1.5:
+                return False
+        
+        # Проверка минимального радиуса поворота
+        # if node1.node_type == NodeType.CIRCLE or node2.node_type == NodeType.CIRCLE:
+        #     # Для движений с поворотом проверяем минимальный радиус
+        #     angle_diff = abs(node2.th - node1.th)
+        #     if angle_diff > 0.1:  # Есть значительный поворот
+        #         # Упрощенная проверка: требуемый радиус не должен быть меньше максимального
+        #         if dist / (2 * math.sin(angle_diff/2)) < self.car.max_steering_angle * 0.8:
+        #             return False
+        
+        return True
+
+
+    def build_graph(self, nodes: List[Node], obstacles: List[Obstacle]) -> nx.Graph:
+
+        self.graph.clear()
+        
+        # Добавляем узлы в граф с атрибутами
+        for i, node in enumerate(nodes):
+            self.graph.add_node(i, 
+                               x=node.x, 
+                               y=node.y, 
+                               th=node.th,
+                               node_type=node.node_type,
+                               circle_id=node.circle_id,
+                               g_cost=node.g_cost,
+                               h_cost=node.h_cost)
+        
+        # Проверяем все возможные соединения
+        print("Построение графа с путями Дубинса")
+        total_checks = 0
+        connections_made = 0
+
+        #plt.axis('equal')
+        #plt.grid(True)
+
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                total_checks += 1
+
+                first_node = nodes[i]
+                second_node = nodes[j]
+
+                # if first_node.node_type == NodeType.CIRCLE:
+                #     #plt.plot(first_node.x, first_node.y, '+', markersize=15)      
+                    
+                # if second_node.node_type == NodeType.CIRCLE:
+                #     #plt.plot(second_node.x, second_node.y, '*', markersize=15)  
+                
+                if self.is_connection_possible(nodes[i], nodes[j], obstacles):
+                    # Вычисляем длину пути Дубинса
+
+                    # переход с линии на линию
+                    if first_node.node_type == NodeType.LINE and second_node.node_type == NodeType.LINE:
+                        path_x = np.linspace(first_node.x, second_node.x, 5)
+                        path_y = np.linspace(first_node.y, second_node.y, 5) 
+                        total_length = np.sqrt(np.square(first_node.x-second_node.x)+np.square(first_node.y-second_node.y))   
+                    # переход с линии на окружность или наоборот
+                    elif first_node.node_type != second_node.node_type:
+                        path_x, path_y, yaws, modes, lengths  = dubins_path_planner.plan_dubins_path(
+                            first_node.x, first_node.y, first_node.th,
+                            second_node.x, second_node.y, second_node.th,
+                            self.curvature, 0.05
+                        )  
+                        total_length = sum(lengths)
+                    # переход с окружности на другую окружность
+                    elif (first_node.node_type == second_node.node_type == NodeType.CIRCLE) and (first_node.circle_id!=second_node.circle_id):
+                        path_x, path_y, yaws, modes, lengths  = dubins_path_planner.plan_dubins_path(
+                            first_node.x, first_node.y, first_node.th,
+                            second_node.x, second_node.y, second_node.th,
+                            self.curvature, 0.05
+                        )
+                    # переход с окружности на эту же окружность (TODO: now by LINE)                
+                    else:
+                        path_x = np.linspace(first_node.x, second_node.x, 5), 
+                        path_y =  np.linspace(first_node.y, second_node.y, 5), 
+                        total_length = np.sqrt(np.square(first_node.x-second_node.x)+np.square(first_node.y-second_node.y))   
+
+                    dubins_distance = total_length
+                    
+                    #plt.plot(path_x, path_y, linewidth=1)
+                    #plt.plot(first_node.x, first_node.y, 'o')
+                    #plt.plot(second_node.x, second_node.y, '*')
+                    # Учитываем тип узлов в стоимости
+                    cost_multiplier = 1.0
+                    if (nodes[i].node_type == NodeType.CIRCLE or 
+                        nodes[j].node_type == NodeType.CIRCLE):
+                        cost_multiplier = 1.5  # Дополнительная стоимость для круговых узлов
+                    
+                    # Сохраняем информацию о ребре
+                    self.graph.add_edge(i, j, 
+                                       weight=dubins_distance*cost_multiplier,
+                                       dubins_distance=dubins_distance,
+                                       start_node=i,
+                                       end_node=j)
+                    connections_made += 1
+        #plt.show()
+        print(f"Проверено соединений: {total_checks}")
+        print(f"Установлено соединений: {connections_made}")
+        print(f"Плотность графа: {connections_made/total_checks*100:.1f}%")
+
+        
+        return self.graph
+        
+    
     def find_optimal_avoidance(self, car_pos: Tuple[float, float], 
                          car_angle: float, 
                          obstacles: List[Obstacle]) -> List[Tuple[float, float]]:
-        start_x, start_y = car_pos
-        
-        # Номинальная траектория
-        nominal_path = [(x, self.nominal_trajectory_y) for x in np.arange(start_x, WIDTH, STEP)]
-        
-        # Ищем препятствия на пути
-        collision_obstacles = []
-        
-        for obstacle in obstacles:
-            for point in nominal_path:
-                dist = math.sqrt((point[0] - obstacle.x)**2 + (point[1] - obstacle.y)**2)
-                if dist < obstacle.safety_radius:
-                    collision_obstacles.append(obstacle)
-                    break
-        
-        # Если нет препятствий, возвращаем номинальный путь
-        if not collision_obstacles:
-            return nominal_path
-        
-        # Берем первое препятствие 
-        # TODO: брать ближайшее
-        obstacle = collision_obstacles[0]
-        
-        # Определяем точку входа и выхода из запретной зоны
-        entry_angle = math.atan2(self.nominal_trajectory_y - obstacle.y, -obstacle.safety_radius)
-        exit_angle = math.atan2(self.nominal_trajectory_y - obstacle.y, obstacle.safety_radius)
-        
-        sign = 1
-        # Определяем сторону объезда
-        if self.nominal_trajectory_y < obstacle.y:
-            # Движение по нижней дуге
-            start_angle = entry_angle
-            end_angle = exit_angle
-            sign = 1
-        else:
-            # Движение по верхней дуге
-            start_angle = -entry_angle
-            end_angle = -exit_angle
-            sign = -1
+        nodes = self.crate_nodes(obstacles)
+        self.build_graph(nodes, obstacles)
 
-        #! Update by Dubins connections
-        # TODO: bruteforce
-        #//for x_start in np.arange(obstacle.y - 100, obstacle.y - obstacle.safety_radius, 10):
-        #//    for angle_connect in np.arange(0, ) 
+        start_node = 0
+        end_node = len(nodes)-2
+        path_nodes = nx.dijkstra_path(self.graph, start_node, end_node, weight='weight')
 
-        x_start_dub = obstacle.x - 175
-        y_start_dub = start_y
-
-        x_circle_dub = obstacle.x
-        y_circle_dub = obstacle.y - sign*obstacle.safety_radius
-
-        x_end_dub = obstacle.x + 175
-        y_end_dub = start_y
-
-        th_start = 0
-        th_circle = 0
-        th_end = 0
-
-        curvature = 1/car.max_turning_radius
-        path_x_to_zone, path_y_to_zone, _, _, _ = dubins_path_planner.plan_dubins_path(
-            x_start_dub, y_start_dub, th_start,
-            x_circle_dub, y_circle_dub, th_circle,
-            curvature, 0.01
-        )
-
-        path_x_from_zone, path_y_from_zone, _, _, _ = dubins_path_planner.plan_dubins_path(
-            x_circle_dub, y_circle_dub, th_circle,
-            x_end_dub, y_end_dub, th_end,
-            curvature, 0.01
-        )
-       
-        # Строим путь
-        full_path = []
+        trajectory_points = []
         
-        # 1. Номинальная траектория до точки входа
-        entry_x = x_start_dub #//obstacle.x + obstacle.safety_radius * math.cos(start_angle)
-        entry_y = y_start_dub  #//obstacle.y+ obstacle.safety_radius * math.sin(start_angle)
-        
-        for point in nominal_path:
-            if point[0] <= entry_x:
-                full_path.append(point)
+        for first_node_indx, second_node_indx in zip(path_nodes[:-1], path_nodes[1:]):
+            first_node = nodes[first_node_indx]
+            second_node = nodes[second_node_indx]
+            
+            # переход с линии на линию
+            if first_node.node_type == NodeType.LINE and second_node.node_type == NodeType.LINE:
+                path_x = np.linspace(first_node.x, second_node.x, 150)
+                path_y = np.linspace(first_node.y, second_node.y, 150)
+                total_length = np.sqrt(np.square(first_node.x-second_node.x)+np.square(first_node.y-second_node.y))
+            
+            # переход с линии на окружность или наоборот
+            elif first_node.node_type != second_node.node_type:
+                path_x, path_y, yaws, modes, lengths = dubins_path_planner.plan_dubins_path(
+                    first_node.x, first_node.y, first_node.th,
+                    second_node.x, second_node.y, second_node.th,
+                    self.curvature, 0.05
+                )
+            
+            # переход с окружности на другую окружность
+            elif (first_node.node_type == second_node.node_type == NodeType.CIRCLE) and (first_node.circle_id != second_node.circle_id):
+                path_x, path_y, yaws, modes, lengths = dubins_path_planner.plan_dubins_path(
+                    first_node.x, first_node.y, first_node.th,
+                    second_node.x, second_node.y, second_node.th,
+                    self.curvature, 0.05
+                )
+            
+            # переход с окружности на эту же окружность
             else:
-                break
+                path_x = np.linspace(first_node.x, second_node.x, 10)
+                path_y = np.linspace(first_node.y, second_node.y, 10)
+                total_length = np.sqrt(np.square(first_node.x-second_node.x)+np.square(first_node.y-second_node.y))
+            
+            # Добавляем точки в список, исключая возможные дубликаты в стыках сегментов
+            for x, y in zip(path_x, path_y):
+                # Пропускаем первую точку сегмента (кроме первого сегмента), 
+                # так как она совпадает с последней точкой предыдущего сегмента
+                if len(trajectory_points) > 0 and np.isclose(x, trajectory_points[-1][0]) and np.isclose(y, trajectory_points[-1][1]):
+                    continue
+                trajectory_points.append((float(x), float(y)))
         
-        # 2. Дубинс - выход на запретную зону
-        #//arc_points = 100
-        #//angle_step = (end_angle - start_angle) / arc_points
+        return trajectory_points
         
-        for x, y in zip(path_x_to_zone, path_y_to_zone):
-            full_path.append((x, y))
-
-        # 3. Движение вдоль запретной зоны
-
-        # 4. Съезд с запретной зоны
-        for x, y in zip(path_x_from_zone, path_y_from_zone):
-            full_path.append((x, y))
-            exit_x = x
-
-        # 5. Номинальная траектория после точки выхода
-        #exit_x = obstacle.x + obstacle.safety_radius * math.cos(end_angle)
-        
-        for point in nominal_path:
-            if point[0] >= exit_x:
-                full_path.append(point)
-        
-        return full_path
     
     def draw_debug(self, surface, path):
         """Отрисовка упрощенного пути"""
@@ -303,7 +1319,7 @@ class ObstacleAvoidancePlanner:
                 surface.blit(text, (point[0] + 8, point[1] - 8))
 
 class Controller:
-    def __init__(self):
+    def __init__(self, car):
         self.trajectory = []
         self.target_trajectory = []
         self.max_trajectory_points = 1500
@@ -314,7 +1330,7 @@ class Controller:
         self.lookahead_distance = 20
         
         # Планировщик объезда
-        self.planner = ObstacleAvoidancePlanner()
+        self.planner = ObstacleAvoidancePlanner(car=car)
         self.current_avoidance_path = []
     
     def plan_avoidance(self, car_x, car_y, car_angle, obstacles):
@@ -519,16 +1535,30 @@ class Car:
 
 def generate_obstacles(count=1):
     obstacles = []
-    for _ in range(count):
-        x = random.randint(400, WIDTH - 200)
-        y = random.randint(200, HEIGHT - 200)
-        obstacles.append(Obstacle(x, y))
+
+    #for _ in range(count):
+    x = random.randint(-10, 10) + 500
+    y = random.randint(-10, 10) + 400
+    obstacles.append(Obstacle(x, y))
+    
+    x = random.randint(-200, 200) + 800
+    y = random.randint(-10, 10) + 400
+    obstacles.append(Obstacle(x, y))
+    
+    x = random.randint(-200, 200) + 600
+    y = random.randint(-200, 200) + 400
+    obstacles.append(Obstacle(x, y))
+    
+    x = random.randint(-200, 200) + 600
+    y = random.randint(-200, 200) + 400
+    obstacles.append(Obstacle(x, y))
+
     return obstacles
 
 # Create game objects
 car = Car()
 obstacles = generate_obstacles(1)
-controller = Controller()
+controller = Controller(car)
 
 # Номинальная траектория
 nominal_y = 400
@@ -545,7 +1575,7 @@ while running:
             running = False
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r:
-                obstacles = generate_obstacles(1)
+                obstacles = generate_obstacles(2)
                 car.collision = False
             elif event.key == pygame.K_c:
                 controller.trajectory = []
